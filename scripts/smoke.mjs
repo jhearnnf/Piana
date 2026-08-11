@@ -10,6 +10,9 @@
  *
  * Screenshots land in `dist-smoke/` so there is something to look at when a
  * check fails.
+ *
+ * It drives a throwaway settings folder rather than the real one, so it can run
+ * with Piana already open and cannot leave your own app muted (see USER_DATA).
  */
 
 import { _electron as electron } from "playwright";
@@ -19,6 +22,22 @@ import fs from "node:fs";
 
 const ROOT = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const SHOTS = path.join(ROOT, "dist-smoke");
+
+/**
+ * A settings folder of its own, thrown away and remade on every run.
+ *
+ * These checks are not read-only: proving that mute and the keyboard zoom survive a restart
+ * means *setting* them, and against the real folder that is someone's app coming back
+ * silent the next morning with no idea why. Pointing Electron somewhere else is the whole
+ * fix — window state, prefs.json and localStorage all live under this one path.
+ *
+ * It also decouples the run from the single-instance lock, which is taken per settings
+ * folder: the app can be open on the desktop while this drives its own copy.
+ *
+ * Fresh each time so "sound is on by default" is a real check of the default rather than
+ * of whatever the last run happened to leave behind.
+ */
+const USER_DATA = path.join(SHOTS, "userdata");
 
 const checks = [];
 const check = (name, ok, detail = "") => {
@@ -31,25 +50,24 @@ if (!fs.existsSync(path.join(ROOT, "dist", "index.html"))) {
   process.exit(1);
 }
 fs.mkdirSync(SHOTS, { recursive: true });
+fs.rmSync(USER_DATA, { recursive: true, force: true });
 
 /**
- * Launch the app.
+ * Launch the app against the throwaway settings folder.
  *
- * The single-instance lock makes a second copy quit the moment it starts, which reaches
- * Playwright as "target has been closed" and a screenful of websocket logs. Since that is
- * the likeliest reason a launch fails on a machine where the app is installed, say so.
+ * `--user-data-dir` is Chromium's own switch and Electron honours it, so nothing in the app
+ * has to know it is being tested. Extra arguments go after it — a `.mid` path, in the one
+ * check that opens a song from the command line.
  */
-async function launch(args = [ROOT]) {
+async function launch(extra = []) {
+  const args = [ROOT, `--user-data-dir=${USER_DATA}`, ...extra];
   try {
     return await electron.launch({ args, cwd: ROOT });
   } catch (err) {
     // Exit rather than throw: Playwright attaches its whole websocket log to the error,
     // and the one line that actually helps would scroll off the top of it.
     console.error(
-      "\nCould not launch the app. Is Piana already open?\n"
-      + "It takes a single-instance lock, so a second copy exits immediately.\n"
-      + "Close the window and run this again.\n"
-      + `\n(${err.message.split("\n")[0]})`,
+      `\nCould not launch the app.\n\n(${err.message.split("\n")[0]})`,
     );
     process.exit(1);
   }
@@ -59,17 +77,16 @@ const app = await launch();
 const page = await app.firstWindow();
 await page.waitForLoadState("domcontentloaded");
 
-// This drives the installed app against its real settings folder, and one of the checks
-// below writes to it. Snapshot the bits it touches so a test run doesn't leave someone's
-// Open dialog pointing at this repo's sample folder.
+// Where the settings actually landed, asked of the app rather than assumed, so this is a
+// check on the override as much as a path to read: if `--user-data-dir` were ever ignored,
+// the prefs assertion at the end would be reading the real folder and this would say so.
 const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath("userData"));
 const prefsPath = path.join(userData, "prefs.json");
-const prefsBefore = fs.existsSync(prefsPath) ? fs.readFileSync(prefsPath, "utf8") : null;
-
-const restorePrefs = () => {
-  if (prefsBefore === null) fs.rmSync(prefsPath, { force: true });
-  else fs.writeFileSync(prefsPath, prefsBefore);
-};
+check(
+  "the run is isolated from the real settings folder",
+  path.resolve(userData) === path.resolve(USER_DATA),
+  userData,
+);
 
 // The renderer builds its whole UI in a constructor, so the canvas existing is
 // the same as the app having started.
@@ -130,12 +147,10 @@ const setZoom = async (value) => {
   await page.waitForTimeout(300);
 };
 
-// Set explicitly rather than assumed: these are remembered across launches now, so a
-// previous run of this script would otherwise leave its own state behind.
-await setZoom("auto");
-if ((await page.getAttribute("#mute", "aria-pressed")) === "true") await page.click("#mute");
-
+// The settings folder is new, so these really are the defaults rather than the last run's
+// leftovers — no need to set them first.
 check("sound is on by default", (await page.getAttribute("#mute", "aria-pressed")) === "false");
+check("the keyboard zoom starts on Auto", (await page.inputValue("#zoom")) === "auto");
 await page.click("#mute");
 check(
   "the mute button reports being muted",
@@ -265,16 +280,12 @@ check("the keyboard zoom survives a restart", remembered === "full", `#zoom is "
 const stillMuted = await reopened.getAttribute("#mute", "aria-pressed");
 check("mute survives a restart", stillMuted === "true", `aria-pressed="${stillMuted}"`);
 
-// Leave the app with its sound on. A test run that quietly mutes someone's app and walks
-// away is a bug report waiting to happen.
-await reopened.click("#mute");
-await reopened.waitForTimeout(200);
 await second.close();
 
 // Opening a .mid by path — "open with Piana", the command line, the picker — should load
 // it and note which folder it came from, so the next Open dialog starts there.
 const sample = path.join(ROOT, "public", "samples", "twinkle-twinkle.mid");
-const third = await launch([ROOT, sample]);
+const third = await launch([sample]);
 const fromArgv = await third.firstWindow();
 await fromArgv.waitForSelector("#stage", { timeout: 15000 });
 await fromArgv.waitForFunction(
@@ -293,7 +304,8 @@ check(
   `songFolder = ${prefs.songFolder ?? "(unset)"}`,
 );
 
-restorePrefs();
+// The settings folder is left where it is, not deleted: when a check fails it is often the
+// first thing worth looking at, and the next run clears it anyway.
 
 const failed = checks.filter((c) => !c.ok);
 console.log(`\n${checks.length - failed.length}/${checks.length} checks passed. Screenshots in ${SHOTS}`);
