@@ -3,15 +3,19 @@ import type { Zoom } from "../render/visibleRange.ts";
 /**
  * Settings that outlive a session.
  *
- * The keyboard zoom, the mute switch and wait mode, and not the rest. Difficulty, hand and
- * section are choices about *this* song, but "show me all 88 keys", "don't make noise" and
- * "hold until I play the note" are statements about how you like to use the app, and
- * re-making them on every launch is the whole annoyance.
+ * The keyboard zoom, the volume and mute switch, and wait mode — and not the rest.
+ * Difficulty, hand and section are choices about *this* song, but "show me all 88 keys",
+ * "this loud", "don't make noise" and "hold until I play the note" are statements about how
+ * you like to use the app, and re-making them on every launch is the whole annoyance.
  */
 
 const ZOOM_KEY = "piana:zoom";
 const MUTED_KEY = "piana:muted";
+const VOLUME_KEY = "piana:volume";
 const WAIT_KEY = "piana:wait";
+
+/** Where the slider sits before anyone has moved it: loud enough to hear, short of full. */
+export const DEFAULT_VOLUME = 0.75;
 
 /**
  * Read back a stored zoom, or null if there isn't a usable one.
@@ -61,6 +65,37 @@ export function loadMuted(): boolean {
 export function saveMuted(muted: boolean): void {
   try {
     localStorage.setItem(MUTED_KEY, String(muted));
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
+/**
+ * How loud was it last time, as 0..1?
+ *
+ * An unreadable value resolves to the default rather than to silence — same reasoning as
+ * the mute switch, and the reason an empty string is rejected before `Number` gets to it
+ * and helpfully turns it into zero. Out-of-range numbers are clamped rather than thrown
+ * away, since a stored 1.2 is plainly a request for "loud".
+ */
+export function parseVolume(raw: string | null): number {
+  if (raw === null || raw.trim() === "") return DEFAULT_VOLUME;
+  const level = Number(raw);
+  if (!Number.isFinite(level)) return DEFAULT_VOLUME;
+  return Math.min(1, Math.max(0, level));
+}
+
+export function loadVolume(): number {
+  try {
+    return parseVolume(localStorage.getItem(VOLUME_KEY));
+  } catch {
+    return DEFAULT_VOLUME;
+  }
+}
+
+export function saveVolume(level: number): void {
+  try {
+    localStorage.setItem(VOLUME_KEY, String(level));
   } catch {
     /* storage unavailable — non-fatal */
   }

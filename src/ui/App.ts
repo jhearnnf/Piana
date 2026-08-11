@@ -7,7 +7,7 @@ import { PointerInput } from "../input/PointerInput.ts";
 import { MidiInput, type MidiStatus } from "../input/MidiInput.ts";
 import type { NoteInputHandler } from "../input/InputSource.ts";
 import { Conductor } from "../game/Conductor.ts";
-import { ToneAudioPlayer } from "../audio/Player.ts";
+import { PianoAudioPlayer } from "../audio/Player.ts";
 import { AutoPlayer } from "../game/AutoPlayer.ts";
 import { GameSession } from "../game/GameSession.ts";
 import type { TimeRange } from "../game/practice.ts";
@@ -28,9 +28,11 @@ import { showTracks } from "./tracksScreen.ts";
 import { desktop } from "../desktop.ts";
 import {
   loadMuted,
+  loadVolume,
   loadWaitMode,
   loadZoom,
   saveMuted,
+  saveVolume,
   saveWaitMode,
   saveZoom,
 } from "./preferences.ts";
@@ -74,7 +76,10 @@ const TEMPLATE = `
     <label><input type="checkbox" id="wait" checked /> Wait mode</label>
     <button id="tracks" type="button" title="Which hand plays each track" disabled>🎼 Tracks</button>
     <button id="scores" type="button" title="Best scores">🏆 Scores</button>
-    <button id="mute" type="button" class="icon-btn" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
+    <span class="volume">
+      <button id="mute" type="button" class="icon-btn" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
+      <input id="volume" type="range" min="0" max="100" step="1" value="75" aria-label="Volume" title="Volume" />
+    </span>
     <label>Speed
       <select id="speed">
         <option value="0.5">0.5×</option>
@@ -107,7 +112,7 @@ const TEMPLATE = `
 export class App {
   private readonly renderer: PianoRenderer;
   private readonly conductor = new Conductor();
-  private readonly audio = new ToneAudioPlayer();
+  private readonly audio = new PianoAudioPlayer();
   private readonly autoPlayer = new AutoPlayer(this.audio);
   private readonly session: GameSession;
 
@@ -150,6 +155,7 @@ export class App {
       scores: root.querySelector("#scores")!,
       speed: root.querySelector("#speed")!,
       mute: root.querySelector("#mute")!,
+      volume: root.querySelector("#volume")!,
       zoom: root.querySelector("#zoom")!,
       songName: root.querySelector("#song-name")!,
       midiStatus: root.querySelector("#midi-status")!,
@@ -159,6 +165,7 @@ export class App {
     // The opening keyboard should already be the one that was chosen last time, rather
     // than the renderer's own default until the first song lands.
     this.applyVisibleRange();
+    this.setVolume(loadVolume());
     this.setMuted(loadMuted());
     this.setWaitMode(loadWaitMode());
     this.wireInputs(canvas);
@@ -174,6 +181,9 @@ export class App {
     const handler: NoteInputHandler = {
       noteOn: (midi, velocity) => {
         this.pressed.add(midi);
+        // Playing a key is itself the gesture the browser wants before it will allow
+        // sound, so the piano works on its own — no song loaded, nothing pressed first.
+        void this.audio.ensureStarted();
         this.audio.noteOn(midi, velocity); // echo the player's own presses
         this.session.handleHit(midi);
       },
@@ -240,6 +250,17 @@ export class App {
       this.setMuted(!this.muted);
       saveMuted(this.muted);
     });
+    (this.el.volume as HTMLInputElement).addEventListener("input", (e) => {
+      const level = Number((e.target as HTMLInputElement).value) / 100;
+      this.setVolume(level);
+      saveVolume(level);
+      // Reaching for the volume is a request to hear something. A slider pushed up while
+      // muted that changed nothing audible would just look broken, so it unmutes.
+      if (this.muted && level > 0) {
+        this.setMuted(false);
+        saveMuted(false);
+      }
+    });
     (this.el.speed as HTMLSelectElement).addEventListener("change", (e) => {
       const rate = Number((e.target as HTMLSelectElement).value);
       this.conductor.rate = rate;
@@ -274,6 +295,12 @@ export class App {
     button.setAttribute("aria-label", muted ? "Unmute" : "Mute");
     button.setAttribute("aria-pressed", String(muted));
     button.classList.toggle("muted", muted);
+  }
+
+  /** Set the output level (0..1) and put the slider in step with it. */
+  private setVolume(level: number): void {
+    this.audio.setVolume(level);
+    (this.el.volume as HTMLInputElement).value = String(Math.round(level * 100));
   }
 
   /** Set wait mode and put the checkbox in step with it. */

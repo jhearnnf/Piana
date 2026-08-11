@@ -112,6 +112,62 @@ body {
   background: #4a2c3a;
 }
 
+/* The mute button and the slider are one control in two halves — grouped so they read
+   that way, and so the gap between them never grows enough to look like two settings. */
+.piana-controls .volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.piana-controls input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 84px;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.piana-controls input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid #000000;
+}
+
+.piana-controls input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  /* Half the thumb above the 6px-tall track, so it rides centred on it. */
+  margin-top: -5px;
+  border-radius: 50%;
+  border: 1px solid #000000;
+  background: var(--accent);
+}
+
+.piana-controls input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid #000000;
+}
+
+.piana-controls input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #000000;
+  background: var(--accent);
+}
+
+.piana-controls input[type="range"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 .piana-stage {
   flex: 1;
   min-height: 0;

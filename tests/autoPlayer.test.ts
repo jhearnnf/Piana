@@ -19,6 +19,7 @@ class MockPlayer implements AudioPlayer {
   setMuted(muted: boolean) {
     this.muted = muted;
   }
+  setVolume() {}
 }
 
 describe("AutoPlayer", () => {

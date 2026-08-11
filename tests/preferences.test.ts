@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseWaitMode, parseZoom } from "../src/ui/preferences.ts";
+import { DEFAULT_VOLUME, parseVolume, parseWaitMode, parseZoom } from "../src/ui/preferences.ts";
 
 describe("parseZoom", () => {
   it("reads back the named zooms", () => {
@@ -22,6 +22,32 @@ describe("parseZoom", () => {
     expect(parseZoom("0")).toBeNull();
     expect(parseZoom("-3")).toBeNull();
     expect(parseZoom("{}")).toBeNull();
+  });
+});
+
+describe("parseVolume", () => {
+  it("starts audible for a first-time user", () => {
+    expect(parseVolume(null)).toBe(DEFAULT_VOLUME);
+    expect(DEFAULT_VOLUME).toBeGreaterThan(0);
+  });
+
+  it("reads back a stored level", () => {
+    expect(parseVolume("0.4")).toBe(0.4);
+    expect(parseVolume("0")).toBe(0);
+    expect(parseVolume("1")).toBe(1);
+  });
+
+  it("clamps a level from outside the slider", () => {
+    expect(parseVolume("1.5")).toBe(1);
+    expect(parseVolume("-2")).toBe(0);
+  });
+
+  it("falls back to the default rather than to silence when the value is nonsense", () => {
+    // "" would be a real trap: Number("") is 0, so an empty value would come back muted.
+    expect(parseVolume("")).toBe(DEFAULT_VOLUME);
+    expect(parseVolume("   ")).toBe(DEFAULT_VOLUME);
+    expect(parseVolume("loud")).toBe(DEFAULT_VOLUME);
+    expect(parseVolume("{}")).toBe(DEFAULT_VOLUME);
   });
 });
 

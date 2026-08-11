@@ -151,6 +151,21 @@ const setZoom = async (value) => {
 // leftovers — no need to set them first.
 check("sound is on by default", (await page.getAttribute("#mute", "aria-pressed")) === "false");
 check("the keyboard zoom starts on Auto", (await page.inputValue("#zoom")) === "auto");
+
+const startingVolume = await page.inputValue("#volume");
+check(
+  "the volume starts part-way up rather than at either end",
+  Number(startingVolume) > 0 && Number(startingVolume) < 100,
+  `#volume is "${startingVolume}"`,
+);
+// Set through the DOM rather than dragged: a range input is a fiddly mouse target, and
+// what is under test is the handler and what it stores, not the browser's own slider.
+await page.evaluate(() => {
+  const slider = document.querySelector("#volume");
+  slider.value = "40";
+  slider.dispatchEvent(new Event("input", { bubbles: true }));
+});
+
 await page.click("#mute");
 check(
   "the mute button reports being muted",
@@ -268,8 +283,8 @@ check("the scores screen closes", (await page.locator(".scores-card").count()) =
 
 await app.close();
 
-// Relaunch: the zoom and the mute switch are both meant to outlive the session, which
-// also proves localStorage works under the custom scheme.
+// Relaunch: the zoom, the volume and the mute switch are all meant to outlive the session,
+// which also proves localStorage works under the custom scheme.
 const second = await launch();
 const reopened = await second.firstWindow();
 await reopened.waitForSelector("#stage", { timeout: 15000 });
@@ -279,6 +294,9 @@ check("the keyboard zoom survives a restart", remembered === "full", `#zoom is "
 
 const stillMuted = await reopened.getAttribute("#mute", "aria-pressed");
 check("mute survives a restart", stillMuted === "true", `aria-pressed="${stillMuted}"`);
+
+const rememberedVolume = await reopened.inputValue("#volume");
+check("the volume survives a restart", rememberedVolume === "40", `#volume is "${rememberedVolume}"`);
 
 await second.close();
 
