@@ -1,0 +1,24 @@
+<!--
+  Piana's app icon. tools/make-icon.cjs rasterises this into assets/*.png and
+  assets/icon.ico, so the shapes are deliberately few and large: at 16px a
+  realistic keyboard turns to grey mush, whereas a white slab under three
+  coloured bars still reads as "notes falling onto a piano".
+
+  The root element's width/height pair is rewritten per size by the rasteriser,
+  which matches on it literally — leave those two attributes as they are.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#14161c" />
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="none" stroke="#2b3040" stroke-width="16" />
+
+  <!-- Falling notes, left hand warm and right hand cool, as in the app. -->
+  <rect x="248" y="340" width="112" height="220" rx="56" fill="#ff9f6b" />
+  <rect x="456" y="200" width="112" height="360" rx="56" fill="#5ac8fa" />
+  <rect x="664" y="400" width="112" height="160" rx="56" fill="#ff9f6b" />
+
+  <!-- The keyboard they are falling onto. -->
+  <rect x="160" y="640" width="704" height="224" rx="28" fill="#f2f4f8" />
+  <rect x="310" y="640" width="64" height="132" rx="14" fill="#14161c" />
+  <rect x="480" y="640" width="64" height="132" rx="14" fill="#14161c" />
+  <rect x="650" y="640" width="64" height="132" rx="14" fill="#14161c" />
+</svg>

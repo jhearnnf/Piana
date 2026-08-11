@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-ssr
+dist-smoke
+*.local
+.DS_Store
+
+# Per-machine Claude Code permissions, not project config.
+.claude/settings.local.json
