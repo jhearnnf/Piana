@@ -1,5 +1,6 @@
 import type { Song } from "../core/types.ts";
 import { BLACK_KEY_HEIGHT_RATIO, computeKeyboard, type KeyRect } from "./keyboardLayout.ts";
+import { nextRepeatStarts, noteBarTop } from "./noteBars.ts";
 
 export interface RendererTheme {
   background: string;
@@ -52,8 +53,42 @@ const DEFAULT_THEME: RendererTheme = {
  * The falling note is the first thing you read — knowing a beat early that the next one
  * is a sharp is what stops the hand landing on the white key beside it. Darkening it is
  * the same cue the keyboard itself gives, moved to where you are already looking.
+ *
+ * Dark enough here that a sharp reads as *outlined* rather than *filled*: shade alone was
+ * a difference you had to look for, and at a glance a dimmed bar reads as "further away"
+ * rather than "black key". Solid versus hollow is a difference in form, which survives
+ * peripheral vision, small keys and a bright room.
  */
-const BLACK_NOTE_SHADE = 0.62;
+const BLACK_NOTE_SHADE = 0.3;
+
+/** Width of a sharp's outline, as a share of the bar's width and in pixels. */
+const BLACK_NOTE_EDGE_RATIO = 0.2;
+const BLACK_NOTE_EDGE_MIN = 2;
+const BLACK_NOTE_EDGE_MAX = 3.5;
+
+/**
+ * How far the strike cap is lightened from the hand colour (0 = hand colour, 1 = white).
+ *
+ * Both hands and both key colours use the same lightening, so the cap always reads as the
+ * same thing — "this is a new press" — rather than as a fifth note colour to learn.
+ */
+const STRIKE_CAP_TINT = 0.55;
+
+/** Height of the strike cap, in pixels and as a share of the bar it sits on. */
+const STRIKE_CAP_HEIGHT = 6;
+const STRIKE_CAP_RATIO = 0.4;
+
+/**
+ * The gap held open below a repeat of the same note, in pixels.
+ *
+ * Taken out of the tail of the note before it (see `noteBars.ts`). Large enough to be
+ * unmistakable at arm's length — a hair's-width gap is worse than none, because it looks
+ * like an artefact rather than a release.
+ */
+const REPEAT_GAP = 14;
+
+/** Shortest a bar may be drawn, so trimming a tail can never erase the note. */
+const MIN_NOTE_HEIGHT = 5;
 
 /** How far the light above a held key reaches, in pixels and as a share of the fall area. */
 const GLOW_MAX_HEIGHT = 130;
@@ -84,6 +119,15 @@ export function shade(hex: string, factor: number): string {
   return `#${parts.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
 }
 
+/** A `#rrggbb` colour mixed towards white by `amount` (0 = unchanged, 1 = white). */
+export function tint(hex: string, amount: number): string {
+  const n = Number.parseInt(hex.slice(1), 16);
+  const channel = (value: number): number =>
+    Math.round(Math.max(0, Math.min(255, value + (255 - value) * amount)));
+  const parts = [channel((n >> 16) & 255), channel((n >> 8) & 255), channel(n & 255)];
+  return `#${parts.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 /** Human label for a MIDI note, e.g. 60 -> "C4". */
@@ -110,10 +154,19 @@ export interface RenderState {
 export class PianoRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly theme: RendererTheme;
-  /** Note fill per hand, darkened for black keys. Derived from the theme once. */
-  private readonly noteFill: Record<"left" | "right", { white: string; black: string }>;
+  /** Note colours per hand: bar fill, sharp outline, strike cap. Derived from the theme once. */
+  private readonly noteFill: Record<
+    "left" | "right",
+    { white: string; black: string; edge: string; cap: string }
+  >;
 
   private song: Song | null = null;
+  /**
+   * Where the next strike of each note's own pitch begins, one entry per note.
+   *
+   * Rebuilt with the song rather than searched per frame — see `noteBars.ts`.
+   */
+  private repeatStarts: number[] = [];
   private lowMidi = 48; // C3
   private highMidi = 83; // B5
   private lookAheadSec = 3;
@@ -131,15 +184,19 @@ export class PianoRenderer {
     if (!ctx) throw new Error("2D canvas context unavailable");
     this.ctx = ctx;
     this.theme = { ...DEFAULT_THEME, ...theme };
-    this.noteFill = {
-      left: { white: this.theme.leftHand, black: shade(this.theme.leftHand, BLACK_NOTE_SHADE) },
-      right: { white: this.theme.rightHand, black: shade(this.theme.rightHand, BLACK_NOTE_SHADE) },
-    };
+    const hand = (colour: string) => ({
+      white: colour,
+      black: shade(colour, BLACK_NOTE_SHADE),
+      edge: colour,
+      cap: tint(colour, STRIKE_CAP_TINT),
+    });
+    this.noteFill = { left: hand(this.theme.leftHand), right: hand(this.theme.rightHand) };
     this.resize();
   }
 
   setSong(song: Song | null): void {
     this.song = song;
+    this.repeatStarts = song ? nextRepeatStarts(song.notes) : [];
   }
 
   setVisibleRange(lowMidi: number, highMidi: number): void {
@@ -243,35 +300,91 @@ export class PianoRenderer {
   }
 
   private drawFallingNotes(song: Song, nowSec: number): void {
-    const { ctx } = this;
     const windowStart = nowSec - 0.5; // keep notes briefly after they're struck
     const windowEnd = nowSec + this.lookAheadSec;
 
-    for (const note of song.notes) {
+    for (let i = 0; i < song.notes.length; i++) {
+      const note = song.notes[i]!;
       if (note.time > windowEnd || note.time + note.duration < windowStart) continue;
       const key = this.keyByMidi.get(note.midi);
       if (!key) continue; // outside the visible range (zoomed out)
 
-      const yBottom = this.timeToY(note.time, nowSec);
-      const yTop = this.timeToY(note.time + note.duration, nowSec);
-      const height = Math.max(3, yBottom - yTop);
+      // The head — the edge that meets the hit line — is the note's start, so a bar falls
+      // head-down and its tail is the part that has already been played.
+      const yHead = this.timeToY(note.time, nowSec);
+      const yEnd = this.timeToY(note.time + note.duration, nowSec);
+
+      const repeatStart = this.repeatStarts[i] ?? Infinity;
+      const yRepeat = Number.isFinite(repeatStart)
+        ? this.timeToY(repeatStart, nowSec)
+        : -Infinity; // never repeated: infinitely far up the screen
+      const yTop = noteBarTop(yEnd, yHead, yRepeat, REPEAT_GAP, MIN_NOTE_HEIGHT);
+      const height = Math.max(MIN_NOTE_HEIGHT, yHead - yTop);
 
       const inset = key.width * 0.08;
       const x = key.x + inset;
       const w = key.width - inset * 2;
 
-      const fill = this.noteFill[note.hand === "left" ? "left" : "right"];
-      ctx.fillStyle = key.isBlack ? fill.black : fill.white;
-      this.roundRect(x, yTop, w, height, Math.min(6, w / 2));
-      ctx.fill();
-      // The darkened fill alone can read as "further away" rather than "black key", so a
-      // sharp also gets the outline its key has.
-      if (key.isBlack) {
-        ctx.strokeStyle = fill.white;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
+      this.drawNoteBar(x, yTop, w, height, key.isBlack, note.hand === "left" ? "left" : "right");
     }
+  }
+
+  /**
+   * One falling note.
+   *
+   * Two things beyond the hand colour are drawn here, and both exist to answer a question
+   * the bar alone cannot: *what am I about to press, and is it a new press?*
+   *
+   * A sharp is hollow — dark body, bright outline — where a natural is solid. Shape reads
+   * faster than shade, and it holds up on the narrow bars a black key gets.
+   *
+   * Every bar is capped with a lighter band at its head. That is the moment of striking
+   * the key, and with the gap held open below a repeat (see `noteBars.ts`) it is what
+   * separates "press this again" from "keep holding it" once the join has slid off the
+   * bottom of the screen.
+   */
+  private drawNoteBar(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    isBlack: boolean,
+    hand: "left" | "right",
+  ): void {
+    const { ctx } = this;
+    const colours = this.noteFill[hand];
+    const radius = Math.min(isBlack ? 3 : 6, w / 2, h / 2);
+
+    ctx.fillStyle = isBlack ? colours.black : colours.white;
+    this.roundRect(x, y, w, h, radius);
+    ctx.fill();
+
+    const capHeight = Math.min(STRIKE_CAP_HEIGHT, h * STRIKE_CAP_RATIO);
+    ctx.save();
+    ctx.clip(); // to the bar just drawn, so the cap keeps its rounded corners
+    ctx.fillStyle = colours.cap;
+    ctx.fillRect(x, y + h - capHeight, w, capHeight);
+    ctx.restore();
+
+    if (!isBlack) return;
+    // Stroked last so the outline runs unbroken across the cap, and inset by half its own
+    // width so a thick line stays inside the bar instead of straddling the neighbouring key.
+    const lineWidth = Math.min(
+      BLACK_NOTE_EDGE_MAX,
+      Math.max(BLACK_NOTE_EDGE_MIN, w * BLACK_NOTE_EDGE_RATIO),
+      w / 3, // a bar zoomed down to a few pixels stays a bar, not a solid line
+      h / 3,
+    );
+    ctx.strokeStyle = colours.edge;
+    ctx.lineWidth = lineWidth;
+    this.roundRect(
+      x + lineWidth / 2,
+      y + lineWidth / 2,
+      w - lineWidth,
+      h - lineWidth,
+      Math.max(0, radius - lineWidth / 2),
+    );
+    ctx.stroke();
   }
 
   private drawHitLine(): void {
