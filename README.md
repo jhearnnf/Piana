@@ -69,6 +69,10 @@ octave) or by **clicking the on-screen piano** — handy for trying things out.
 - **🔊 / 🔇** — mute everything the app plays: the accompaniment *and* the echo of your own
   presses. Handy when your MIDI keyboard already makes its own sound. The notes still fall
   and you're still scored. Remembered between launches.
+- **Input** — which MIDI device to listen to. **All devices** by default, which is right
+  when the keyboard is the only thing on the bus; pick your piano by name when it isn't, so
+  a control surface or a DAW port alongside it is ignored. Remembered between launches, and
+  kept on the menu marked *(not connected)* when the keyboard you chose isn't plugged in.
 - **Keys** — how much of the piano is on screen. **Auto** (the default) trims it to the
   octaves the song actually uses, so the keys are as wide as they can be; **Full 88** shows
   the whole piano. Your choice is remembered between launches.

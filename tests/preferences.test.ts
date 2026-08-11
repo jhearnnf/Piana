@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_VOLUME, parseVolume, parseWaitMode, parseZoom } from "../src/ui/preferences.ts";
+import {
+  DEFAULT_VOLUME,
+  parseMidiDevice,
+  parseVolume,
+  parseWaitMode,
+  parseZoom,
+} from "../src/ui/preferences.ts";
 
 describe("parseZoom", () => {
   it("reads back the named zooms", () => {
@@ -64,5 +70,26 @@ describe("parseWaitMode", () => {
   it("falls back to waiting when the stored value is nonsense", () => {
     expect(parseWaitMode("")).toBe(true);
     expect(parseWaitMode("{}")).toBe(true);
+  });
+});
+
+describe("parseMidiDevice", () => {
+  it("listens to every device for a first-time user", () => {
+    expect(parseMidiDevice(null)).toBeNull();
+  });
+
+  it("reads back a chosen device", () => {
+    expect(parseMidiDevice("Digital Piano")).toBe("Digital Piano");
+  });
+
+  it("treats an empty choice as every device", () => {
+    // This is how "All devices" is written: the empty value of its <option>.
+    expect(parseMidiDevice("")).toBeNull();
+    expect(parseMidiDevice("   ")).toBeNull();
+  });
+
+  it("keeps names a keyboard might really report", () => {
+    expect(parseMidiDevice("  CASIO USB-MIDI  ")).toBe("CASIO USB-MIDI");
+    expect(parseMidiDevice("{}")).toBe("{}");
   });
 });

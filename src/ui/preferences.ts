@@ -3,16 +3,18 @@ import type { Zoom } from "../render/visibleRange.ts";
 /**
  * Settings that outlive a session.
  *
- * The keyboard zoom, the volume and mute switch, and wait mode — and not the rest.
- * Difficulty, hand and section are choices about *this* song, but "show me all 88 keys",
- * "this loud", "don't make noise" and "hold until I play the note" are statements about how
- * you like to use the app, and re-making them on every launch is the whole annoyance.
+ * The keyboard zoom, the volume and mute switch, wait mode, and which MIDI device to
+ * listen to — and not the rest. Difficulty, hand and section are choices about *this* song,
+ * but "show me all 88 keys", "this loud", "don't make noise", "hold until I play the note"
+ * and "the piano, not the fader box" are statements about how you like to use the app, and
+ * re-making them on every launch is the whole annoyance.
  */
 
 const ZOOM_KEY = "piana:zoom";
 const MUTED_KEY = "piana:muted";
 const VOLUME_KEY = "piana:volume";
 const WAIT_KEY = "piana:wait";
+const MIDI_DEVICE_KEY = "piana:midi-device";
 
 /** Where the slider sits before anyone has moved it: loud enough to hear, short of full. */
 export const DEFAULT_VOLUME = 0.75;
@@ -123,6 +125,34 @@ export function loadWaitMode(): boolean {
 export function saveWaitMode(wait: boolean): void {
   try {
     localStorage.setItem(WAIT_KEY, String(wait));
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
+/**
+ * Which MIDI device to listen to, by name, or null for all of them.
+ *
+ * Null is the honest reading of an empty or missing value: nobody has chosen a device yet,
+ * so every device counts. Stored as the device's name — see `chooseInputs` for why not the
+ * Web MIDI id — and only whitespace-trimmed on the way back, since a keyboard is free to
+ * call itself anything at all and this has no list of valid names to check it against.
+ */
+export function parseMidiDevice(raw: string | null): string | null {
+  return raw === null || raw.trim() === "" ? null : raw.trim();
+}
+
+export function loadMidiDevice(): string | null {
+  try {
+    return parseMidiDevice(localStorage.getItem(MIDI_DEVICE_KEY));
+  } catch {
+    return null; // storage unavailable — listen to everything
+  }
+}
+
+export function saveMidiDevice(name: string | null): void {
+  try {
+    localStorage.setItem(MIDI_DEVICE_KEY, name ?? "");
   } catch {
     /* storage unavailable — non-fatal */
   }

@@ -4,7 +4,8 @@ import { PianoRenderer } from "../render/PianoRenderer.ts";
 import { visibleRange, type Zoom } from "../render/visibleRange.ts";
 import { ComputerKeyboardInput } from "../input/ComputerKeyboardInput.ts";
 import { PointerInput } from "../input/PointerInput.ts";
-import { MidiInput, type MidiStatus } from "../input/MidiInput.ts";
+import { MidiInput } from "../input/MidiInput.ts";
+import type { MidiState, MidiStatus } from "../input/midiDevices.ts";
 import type { NoteInputHandler } from "../input/InputSource.ts";
 import { Conductor } from "../game/Conductor.ts";
 import { PianoAudioPlayer } from "../audio/Player.ts";
@@ -27,10 +28,12 @@ import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
 import { desktop } from "../desktop.ts";
 import {
+  loadMidiDevice,
   loadMuted,
   loadVolume,
   loadWaitMode,
   loadZoom,
+  saveMidiDevice,
   saveMuted,
   saveVolume,
   saveWaitMode,
@@ -44,8 +47,12 @@ const MIDI_LABELS: Record<MidiStatus, string> = {
   unsupported: "🎹 MIDI: not supported (use Chrome/Edge)",
   unavailable: "🎹 MIDI: blocked",
   "no-device": "🎹 MIDI: no device",
+  "device-missing": "🎹 MIDI: chosen device not connected",
   connected: "🎹 MIDI: connected",
 };
+
+/** Menu value for "don't single out a device" — the empty string an `<option>` gives back. */
+const ALL_DEVICES = "";
 
 const TEMPLATE = `
   <header class="piana-header">
@@ -98,6 +105,11 @@ const TEMPLATE = `
       </select>
     </label>
     <span id="song-name" class="song-name">No song loaded</span>
+    <label id="midi-device-row" hidden>Input
+      <select id="midi-device" title="Which MIDI device to listen to">
+        <option value="">All devices</option>
+      </select>
+    </label>
     <span id="midi-status" class="midi-status">🎹 MIDI: …</span>
   </div>
   <div class="piana-stage"><canvas id="stage"></canvas></div>
@@ -158,6 +170,8 @@ export class App {
       volume: root.querySelector("#volume")!,
       zoom: root.querySelector("#zoom")!,
       songName: root.querySelector("#song-name")!,
+      midiDevice: root.querySelector("#midi-device")!,
+      midiDeviceRow: root.querySelector("#midi-device-row")!,
       midiStatus: root.querySelector("#midi-status")!,
     };
 
@@ -196,12 +210,51 @@ export class App {
     new PointerInput(canvas, this.renderer).connect(handler);
 
     const midi = new MidiInput();
-    midi.onStatus = (status, name) => {
-      const el = this.el.midiStatus!;
-      el.textContent = name && status === "connected" ? `🎹 ${name}` : MIDI_LABELS[status];
-      el.classList.toggle("ok", status === "connected");
-    };
+    midi.onStatus = (state) => this.showMidiState(state);
+    midi.selectDevice(loadMidiDevice()); // before connect: applied as soon as access lands
     midi.connect(handler);
+
+    (this.el.midiDevice as HTMLSelectElement).addEventListener("change", (e) => {
+      const name = (e.target as HTMLSelectElement).value || null;
+      saveMidiDevice(name);
+      midi.selectDevice(name);
+    });
+  }
+
+  /**
+   * Show which devices are on the bus, which one is being heard, and the connection state.
+   *
+   * The status pill deliberately says only "connected" now that the device menu is next to
+   * it. It used to show the name of whichever input the browser happened to enumerate
+   * first, which on a bus with a control surface on it meant the app announced a box of
+   * faders as your piano.
+   */
+  private showMidiState({ status, devices, selected }: MidiState): void {
+    const pill = this.el.midiStatus!;
+    pill.textContent = MIDI_LABELS[status];
+    pill.classList.toggle("ok", status === "connected");
+
+    // Hidden only where there is no MIDI to speak of. It stays up for a single device,
+    // and for none: the question it answers first is "what does the app think is plugged
+    // in?", and a menu that appears only once you already have two keyboards can't answer
+    // it at the moment you are wondering.
+    this.el.midiDeviceRow!.hidden = status === "unsupported" || status === "unavailable";
+
+    // A chosen device that isn't plugged in stays on the menu, marked. Dropping it would
+    // silently reset the app to listening to everything — the very thing that was chosen
+    // against — and the reset would only show up as a fader box playing your notes.
+    const names = selected !== null && !devices.includes(selected) ? [...devices, selected] : devices;
+    // Built as elements rather than as markup, unlike the section menu: a device names
+    // itself, and a name with a quote or an angle bracket in it would otherwise be
+    // pasted straight into the page's HTML.
+    const select = this.el.midiDevice as HTMLSelectElement;
+    const label = (name: string) =>
+      name === selected && status === "device-missing" ? `${name} (not connected)` : name;
+    select.replaceChildren(
+      new Option("All devices", ALL_DEVICES),
+      ...names.map((name) => new Option(label(name), name)),
+    );
+    select.value = selected ?? ALL_DEVICES;
   }
 
   private wireControls(): void {

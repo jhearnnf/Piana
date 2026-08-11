@@ -216,6 +216,12 @@ body {
   color: var(--good);
 }
 
+/* Device names run long ("nanoKONTROL2 SLIDER/KNOB"), and the control row is one wrapping
+   line — better that a name is clipped than that it pushes the rest onto a new row. */
+#midi-device {
+  max-width: 180px;
+}
+
 .piana-controls select {
   background: var(--panel-2);
   color: var(--text);
