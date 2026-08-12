@@ -12,6 +12,13 @@
 # Windows reads a taskbar button's icon out of the running executable and
 # ignores both the window icon and this shortcut's IconLocation.
 #
+# The IconLocation is that same Piana.exe rather than assets\icon.ico, so the
+# shortcut and the taskbar button draw from one source. Naming the .ico works
+# too, but the shell caches what it rasterises per icon path: re-running this
+# after editing the icon leaves the shortcut on the previous rendering until
+# the icon cache is rebuilt, whereas make-exe.ps1 rewrites the .exe each time
+# and a changed .exe invalidates its own cache entry.
+#
 # Both shortcuts are also stamped with an AppUserModelID matching the one
 # electron/main.cjs passes to app.setAppUserModelId, which is what ties a
 # running window to its pinned button instead of leaving a second, loose one.
@@ -136,7 +143,7 @@ function Write-PianaShortcut([string]$Path) {
   $shortcut.TargetPath       = $exe
   $shortcut.Arguments        = '"' + $root + '"'
   $shortcut.WorkingDirectory = $root
-  $shortcut.IconLocation     = $icon
+  $shortcut.IconLocation     = "$exe,0"
   $shortcut.Description      = 'Piana - a minimal Synthesia-style piano trainer'
   $shortcut.WindowStyle      = 1
   $shortcut.Save()

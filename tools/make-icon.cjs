@@ -40,8 +40,12 @@ app.disableHardwareAcceleration();
 // scale rather than downsampling one master, which keeps the small ones crisp.
 const FRAME = Math.max(...SIZES);
 
-// One window, reused. Destroying an offscreen window and immediately opening
-// another makes the next load fail with ERR_FAILED.
+// A window per size. Reusing one loses transparency: only the first page a
+// transparent offscreen window loads paints with an alpha channel, and every
+// load after it comes back composited onto opaque white, which is a white
+// square behind the icon's rounded corners. Destroying one and immediately
+// opening another makes the next load fail with ERR_FAILED, so they are all
+// kept alive until the end instead.
 function makeWindow() {
   return new BrowserWindow({
     width: FRAME,
@@ -110,6 +114,13 @@ function pngSize(png) {
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
 }
 
+// IHDR's colour type. 6 is RGBA; anything else means the capture came back
+// flattened and the icon would sit on an opaque square, which is easy to miss
+// against a light window and glaring on a dark taskbar.
+function pngHasAlpha(png) {
+  return png[25] === 6;
+}
+
 /**
  * Packs PNGs into an .ico. Windows has accepted PNG-compressed icon entries
  * since Vista, so each size goes in as-is rather than being re-encoded to BMP.
@@ -141,19 +152,25 @@ function buildIco(images) {
 
 app.whenReady().then(async () => {
   const svg = fs.readFileSync(SVG, 'utf8');
-  const win = makeWindow();
+  const windows = [];
   const images = [];
 
   for (const size of SIZES) {
+    const win = makeWindow();
+    windows.push(win);
+
     const png = await renderAt(win, svg, size);
     const actual = pngSize(png);
     if (actual.width !== size || actual.height !== size) {
       throw new Error(`expected ${size}x${size}, got ${actual.width}x${actual.height}`);
     }
+    if (!pngHasAlpha(png)) throw new Error(`${size}px came back without an alpha channel`);
     fs.writeFileSync(path.join(ASSETS, `icon-${size}.png`), png);
     if (ICO_SIZES.includes(size)) images.push({ size, png });
     console.log(`icon-${size}.png  ${size}x${size}  ${png.length} bytes`);
   }
+
+  windows.forEach((win) => win.destroy());
 
   const ico = path.join(ASSETS, 'icon.ico');
   fs.writeFileSync(ico, buildIco(images));
