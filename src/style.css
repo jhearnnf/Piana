@@ -168,6 +168,52 @@ body {
   outline-offset: 3px;
 }
 
+/* Where you are in the run, as its own strip between the controls and the stage: the one
+   question the falling notes cannot answer, since they only ever show the next few seconds.
+   Deliberately not shaped like a slider — it reports the position, it does not set it. */
+.piana-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid #000000;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* `display: flex` beats the hidden attribute, so say it again for the empty screen. */
+.piana-progress[hidden] {
+  display: none;
+}
+
+.piana-progress .time {
+  font-variant-numeric: tabular-nums; /* so the bar doesn't shuffle as the digits tick */
+  min-width: 38px;
+}
+
+.progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid #000000;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+}
+
+/* Named only when a section is being practised, because that is when the times beside it
+   stop meaning the whole song. */
+.progress-scope:not(:empty) {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .piana-stage {
   flex: 1;
   min-height: 0;

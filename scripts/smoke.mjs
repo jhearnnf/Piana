@@ -202,6 +202,29 @@ await page.waitForTimeout(600);
 const playLabel = await page.textContent("#play");
 check("a loaded song starts playing by itself", /Pause/.test(playLabel ?? ""), playLabel ?? "");
 check("wait mode is on by default", await page.isChecked("#wait"));
+
+// The progress strip: hidden on the empty screen, and once a song is up it has to show a
+// real length rather than the 0:00 it starts life as.
+check("the progress bar appears with the song", await page.isVisible("#progress"));
+const total = await page.textContent("#time-total");
+check(
+  "the progress bar knows the song's length",
+  /^\d+:[0-5]\d$/.test(total ?? "") && total !== "0:00",
+  `total is "${total}"`,
+);
+
+// That it also *moves*. Wait mode is holding the clock on the first chord, which is the
+// point of wait mode, so this is checked with it off — and then put back, so the rest of
+// the run sees the app as it was.
+await page.uncheck("#wait");
+await page.click("#play");
+await page.waitForTimeout(1400);
+const elapsed = await page.textContent("#time-now");
+const filled = await page.evaluate(() => document.querySelector("#progress-fill").style.width);
+check("the progress bar advances as the song plays", elapsed !== "0:00", `${elapsed} / ${filled}`);
+await page.check("#wait");
+await page.click("#play");
+await page.waitForTimeout(300);
 await page.screenshot({ path: path.join(SHOTS, "02-playing.png") });
 
 check(

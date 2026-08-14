@@ -23,6 +23,7 @@ import {
 import { applyDifficulty } from "../song/difficulty.ts";
 import { applyHandModes, defaultHandModes, type HandMode } from "../song/handModes.ts";
 import { detectSections, fullSongSection, type Section } from "../song/sections.ts";
+import { elapsedInRange, formatTime, progressFraction } from "./progress.ts";
 import { showResults } from "./resultsScreen.ts";
 import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
@@ -112,6 +113,15 @@ const TEMPLATE = `
     </label>
     <span id="midi-status" class="midi-status">🎹 MIDI: …</span>
   </div>
+  <div class="piana-progress" id="progress" hidden>
+    <span class="time" id="time-now">0:00</span>
+    <div class="progress-track" id="progress-track" role="progressbar"
+         aria-label="Song progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+    <span class="time" id="time-total">0:00</span>
+    <span class="progress-scope" id="progress-scope"></span>
+  </div>
   <div class="piana-stage"><canvas id="stage"></canvas></div>
 `;
 
@@ -145,6 +155,11 @@ export class App {
   private range: TimeRange | null = null;
   private sectionId = "full";
   private wasPlaying = false;
+  /** The stretch of song the current run covers — the section, or all of it. */
+  private runRange: TimeRange | null = null;
+  /** Last strings written to the progress readout, so the frame loop can skip no-op writes. */
+  private shownTime = "";
+  private shownPercent = -1;
 
   constructor(root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -173,6 +188,12 @@ export class App {
       midiDevice: root.querySelector("#midi-device")!,
       midiDeviceRow: root.querySelector("#midi-device-row")!,
       midiStatus: root.querySelector("#midi-status")!,
+      progress: root.querySelector("#progress")!,
+      progressTrack: root.querySelector("#progress-track")!,
+      progressFill: root.querySelector("#progress-fill")!,
+      progressScope: root.querySelector("#progress-scope")!,
+      timeNow: root.querySelector("#time-now")!,
+      timeTotal: root.querySelector("#time-total")!,
     };
 
     this.restoreZoom();
@@ -555,6 +576,51 @@ export class App {
     });
     this.el.songName!.textContent = `${song.name} — ${song.notes.length} notes`;
     this.updatePlayButton();
+    this.setRunRange(song);
+  }
+
+  /**
+   * Point the progress bar at whatever the run now covers.
+   *
+   * Mirrors the range the session was just configured with, so the bar measures the same
+   * stretch that is actually being played: pick a section and it re-scales to that section
+   * rather than leaving you to find eight bars inside a bar for the whole piece.
+   */
+  private setRunRange(song: Song): void {
+    this.runRange = this.range ?? { start: 0, end: song.durationSec };
+    this.el.progress!.hidden = false;
+
+    const section = this.sections.find((s) => s.id === this.sectionId);
+    this.el.progressScope!.textContent = section ? section.name : "";
+    this.el.timeTotal!.textContent = formatTime(this.runRange.end - this.runRange.start);
+    this.shownTime = ""; // the elapsed side is re-read next frame against the new range
+    this.shownPercent = -1;
+  }
+
+  /**
+   * Draw the current position into the bar and the readout.
+   *
+   * Called every frame, so both halves are written only when they would actually change:
+   * the text about once a second, the bar at whole percents. Wait mode holds the clock at
+   * a gate, which is the point — a bar that crept on while you were stuck on a chord would
+   * be reporting the wrong thing.
+   */
+  private updateProgress(nowSec: number): void {
+    const range = this.runRange;
+    if (!range) return;
+
+    const percent = Math.round(progressFraction(nowSec, range) * 100);
+    if (percent !== this.shownPercent) {
+      this.shownPercent = percent;
+      (this.el.progressFill as HTMLElement).style.width = `${percent}%`;
+      this.el.progressTrack!.setAttribute("aria-valuenow", String(percent));
+    }
+
+    const elapsed = formatTime(elapsedInRange(nowSec, range));
+    if (elapsed !== this.shownTime) {
+      this.shownTime = elapsed;
+      this.el.timeNow!.textContent = elapsed;
+    }
   }
 
   /**
@@ -616,6 +682,7 @@ export class App {
     const now = this.conductor.time;
     this.autoPlayer.update(now);
     this.renderer.render({ nowSec: now, pressed: this.pressed });
+    this.updateProgress(now);
 
     if (this.wasPlaying !== this.conductor.isPlaying()) this.updatePlayButton();
     this.wasPlaying = this.conductor.isPlaying();
