@@ -67,3 +67,52 @@ export function groupChords(notes: readonly Note[], toleranceSec = 0.03): NoteGr
   }
   return groups;
 }
+
+/**
+ * How far past the current gate a press may still reach, in seconds.
+ *
+ * Notes written a few milliseconds apart become separate gates, but two keys struck
+ * together arrive in whatever order the keyboard's scan happens to produce — so the
+ * second one would land on a gate that isn't current yet and be judged wrong, leaving
+ * its own gate waiting for a note already played. Wider than {@link groupChords}'
+ * tolerance because this only decides *ordering*: every note must still be played, and
+ * the run stays held until it is. Sized from real files, where the rolled chords and
+ * near-simultaneous onsets that cause this sit under 80ms.
+ */
+export const TOGETHER_SEC = 0.08;
+
+/**
+ * Which pending gate a press belongs to, or null if it belongs to none (a wrong note).
+ *
+ * Looks at the current gate first, then any that follow within `toleranceSec` of it, so a
+ * chord written slightly spread can be played in any order. Checking the current gate
+ * first is what keeps a repeated note honest: when the same pitch is due twice in a row,
+ * the press fills the gate that is due now, not the one after it.
+ */
+export function findGate(
+  groups: readonly NoteGroup[],
+  gateIndex: number,
+  midi: number,
+  satisfied: ReadonlyMap<number, ReadonlySet<number>>,
+  toleranceSec = TOGETHER_SEC,
+): number | null {
+  const current = groups[gateIndex];
+  if (!current) return null;
+  for (let i = gateIndex; i < groups.length; i++) {
+    const group = groups[i]!;
+    if (group.time - current.time > toleranceSec) break;
+    if (group.midis.includes(midi) && !satisfied.get(i)?.has(midi)) return i;
+  }
+  return null;
+}
+
+/** Step the gate past every group that is now complete, so the song resumes. */
+export function advanceGate(
+  groups: readonly NoteGroup[],
+  gateIndex: number,
+  satisfied: ReadonlyMap<number, ReadonlySet<number>>,
+): number {
+  let i = gateIndex;
+  while (i < groups.length && (satisfied.get(i)?.size ?? 0) >= groups[i]!.midis.length) i++;
+  return i;
+}

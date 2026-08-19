@@ -2,7 +2,14 @@ import type { Difficulty, HandSelection, Note, Song } from "../core/types.ts";
 import type { Conductor } from "./Conductor.ts";
 import type { AutoPlayer } from "./AutoPlayer.ts";
 import { ScoringSession, type HitResult, type ScoreResult } from "./Scoring.ts";
-import { groupChords, splitPractice, type NoteGroup, type TimeRange } from "./practice.ts";
+import {
+  advanceGate,
+  findGate,
+  groupChords,
+  splitPractice,
+  type NoteGroup,
+  type TimeRange,
+} from "./practice.ts";
 
 export interface SessionConfig {
   song: Song;
@@ -32,7 +39,8 @@ export class GameSession {
   // Wait-mode gating over chord groups.
   private groups: NoteGroup[] = [];
   private gateIndex = 0;
-  private readonly gateSatisfied = new Set<number>();
+  /** Which pitches of each pending gate have been played, keyed by gate index. */
+  private readonly gateSatisfied = new Map<number, Set<number>>();
 
   private rangeStart = 0;
   private rangeEnd = 0;
@@ -101,19 +109,22 @@ export class GameSession {
   }
 
   private handleWaitHit(midi: number): HitResult {
-    const group = this.groups[this.gateIndex];
-    if (group && group.midis.includes(midi) && !this.gateSatisfied.has(midi)) {
-      this.gateSatisfied.add(midi);
-      // Judge at the ideal time: wait-mode rewards correctness, not reaction speed.
-      const result = this.scoring!.registerHit(midi, group.time);
-      if (this.gateSatisfied.size >= group.midis.length) {
-        this.gateIndex++;
-        this.gateSatisfied.clear();
-      }
-      return result;
+    const index = findGate(this.groups, this.gateIndex, midi, this.gateSatisfied);
+    // A note belonging to no gate within reach counts as wrong.
+    if (index === null) return this.scoring!.registerHit(midi, this.conductor.time);
+
+    let played = this.gateSatisfied.get(index);
+    if (!played) this.gateSatisfied.set(index, (played = new Set()));
+    played.add(midi);
+    // Judge at the ideal time: wait-mode rewards correctness, not reaction speed.
+    const result = this.scoring!.registerHit(midi, this.groups[index]!.time);
+
+    this.gateIndex = advanceGate(this.groups, this.gateIndex, this.gateSatisfied);
+    // Gates left behind can't be revisited; drop them so the map stays the size of the reach.
+    for (const passed of this.gateSatisfied.keys()) {
+      if (passed < this.gateIndex) this.gateSatisfied.delete(passed);
     }
-    // A note that isn't part of the current chord counts as wrong.
-    return this.scoring!.registerHit(midi, this.conductor.time);
+    return result;
   }
 
   /** Advance the session to `nowSec`. Call once per frame after the Conductor ticks. */
