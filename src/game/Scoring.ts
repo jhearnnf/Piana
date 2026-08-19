@@ -43,7 +43,14 @@ export interface ScoreResult {
   missed: number;
   wrong: number;
   maxCombo: number;
-  /** Fraction of expected notes hit (perfect or good), 0-1. */
+  /**
+   * Fraction of note events that were right, 0-1.
+   *
+   * Counted over everything that happened *and* everything that should have: the
+   * denominator is the expected notes plus the wrong ones you played. Scoring only the
+   * expected notes would make wait mode — which holds the song until you play each note —
+   * report 100% on every run, since nothing there can ever go unhit.
+   */
   accuracy: number;
   /** Mean absolute timing error of hits, in milliseconds. */
   avgTimingMs: number;
@@ -150,7 +157,8 @@ export class ScoringSession {
     const penalty = this.wrong * this.opts.wrongPenalty;
     const multiplier = DIFFICULTY_MULTIPLIER[difficulty];
     const score = Math.max(0, Math.round((rawPoints - penalty) * multiplier));
-    const accuracy = totalNotes === 0 ? 0 : (this.perfect + this.good) / totalNotes;
+    const judged = totalNotes + this.wrong;
+    const accuracy = judged === 0 ? 0 : (this.perfect + this.good) / judged;
 
     return {
       totalNotes,

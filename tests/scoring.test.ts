@@ -38,6 +38,26 @@ describe("ScoringSession", () => {
     expect(r.maxCombo).toBe(1);
   });
 
+  it("counts wrong notes against accuracy", () => {
+    const s = new ScoringSession(expected);
+    s.registerHit(60, 1.0);
+    s.registerHit(62, 2.0);
+    s.registerHit(64, 3.0);
+    s.registerHit(99, 3.0); // every note hit, but one extra wrong key
+    s.finalize();
+    const r = s.result();
+    expect(r.missed).toBe(0);
+    expect(r.accuracy).toBeCloseTo(3 / 4); // not 100% -- the wrong note is judged too
+    expect(r.stars).toBe(1);
+  });
+
+  it("gives a run of nothing but wrong notes zero accuracy", () => {
+    const s = new ScoringSession([]);
+    s.registerHit(99, 1.0);
+    s.finalize();
+    expect(s.result().accuracy).toBe(0);
+  });
+
   it("marks notes as missed once their window closes", () => {
     const s = new ScoringSession(expected);
     s.registerHit(60, 1.0); // hit first
