@@ -187,10 +187,17 @@ check(
 );
 await page.screenshot({ path: path.join(SHOTS, "02-empty-full88.png") });
 
-// "Load demo" fetches samples/twinkle-twinkle.mid relative to the page, which
+// Nothing to play yet, and the transport says so rather than answering clicks with
+// silence. Checked before the demo loads, which is the only moment it is true.
+check(
+  "Play and Restart are disabled until a song is loaded",
+  (await page.isDisabled("#play")) && (await page.isDisabled("#restart")),
+);
+
+// The Demo button fetches samples/twinkle-twinkle.mid relative to the page, which
 // is the check that the custom scheme is fetchable — under file:// it is not.
 await page.click("#demo");
-await page.waitForFunction(() => /notes$/.test(document.querySelector("#song-name")?.textContent ?? ""), null, {
+await page.waitForFunction(() => /notes$/.test(document.querySelector("#song-meta")?.textContent ?? ""), null, {
   timeout: 10000,
 });
 const loaded = await page.textContent("#song-name");
@@ -240,6 +247,28 @@ check(
     return false;
   }),
 );
+
+// Difficulty and speed are segmented controls rather than dropdowns, and one shared
+// handler drives all three of them. The clicked button becoming the chosen one is the only
+// visible sign it ran at all — a broken handler would just look like a button that does
+// nothing, on every one of them at once.
+await page.click('#difficulty button[data-difficulty="easy"]');
+const chosen = async (group, attr, value) =>
+  page.getAttribute(`#${group} button[data-${attr}="${value}"]`, "aria-pressed");
+check(
+  "picking a difficulty moves the marker onto it",
+  (await chosen("difficulty", "difficulty", "easy")) === "true"
+    && (await chosen("difficulty", "difficulty", "hard")) === "false",
+);
+await page.click('#difficulty button[data-difficulty="hard"]'); // put it back
+
+await page.click('#speed button[data-rate="0.5"]');
+check("picking a speed moves the marker onto it", (await chosen("speed", "rate", "0.5")) === "true");
+await page.click('#speed button[data-rate="1"]');
+
+await page.click('#hand button[data-hand="right"]');
+check("picking a hand moves the marker onto it", (await chosen("hand", "hand", "right")) === "true");
+await page.click('#hand button[data-hand="both"]');
 
 // "Auto" trims the keyboard to the octaves the song actually uses, which is why the
 // full piano is not there by default.
@@ -330,12 +359,50 @@ const third = await launch([sample]);
 const fromArgv = await third.firstWindow();
 await fromArgv.waitForSelector("#stage", { timeout: 15000 });
 await fromArgv.waitForFunction(
-  () => /notes$/.test(document.querySelector("#song-name")?.textContent ?? ""),
+  () => /notes$/.test(document.querySelector("#song-meta")?.textContent ?? ""),
   null,
   { timeout: 10000 },
 );
 const argvSong = await fromArgv.textContent("#song-name");
 check("a .mid on the command line opens", /twinkle/i.test(argvSong ?? ""), argvSong ?? "");
+
+// The song list, which reads the folder that song came from. It has to run here rather
+// than in the first launch: before anything has been opened there is no folder to list.
+await fromArgv.click("#library");
+await fromArgv.waitForSelector(".library-card", { timeout: 5000 });
+const listed = await fromArgv.$$eval(".library-title", (els) => els.map((e) => e.textContent.trim()));
+check(
+  "the song list shows the MIDI files in the remembered folder",
+  listed.includes("twinkle-twinkle"),
+  listed.join(" / ") || "(empty)",
+);
+check(
+  "the listed folder is the one the song came from",
+  (await fromArgv.textContent("#library-path")) === path.dirname(sample),
+  (await fromArgv.textContent("#library-path")) ?? "",
+);
+check(
+  "the song list marks the song that is loaded",
+  (await fromArgv.locator(".library-row.current").count()) === 1,
+);
+await fromArgv.screenshot({ path: path.join(SHOTS, "07-library.png") });
+
+// Searching narrows it, and a search that matches nothing empties it rather than
+// silently showing everything.
+await fromArgv.fill("#library-query", "twink");
+check("searching keeps a matching song", (await fromArgv.locator(".library-row").count()) === 1);
+await fromArgv.fill("#library-query", "ragtime");
+check("searching drops the ones that don't match", (await fromArgv.locator(".library-row").count()) === 0);
+await fromArgv.fill("#library-query", "");
+
+// Enter on the highlighted row is the whole point of the screen: it should close the
+// list and load the song, without a file dialog anywhere.
+await fromArgv.press("#library-query", "Enter");
+await fromArgv.waitForTimeout(800);
+check("the song list closes when a song is chosen", (await fromArgv.locator(".library-card").count()) === 0);
+const opened = await fromArgv.textContent("#song-name");
+check("Enter on a listed song loads it", /twinkle/i.test(opened ?? ""), opened ?? "");
+
 await third.close();
 
 const prefs = fs.existsSync(prefsPath) ? JSON.parse(fs.readFileSync(prefsPath, "utf8")) : {};

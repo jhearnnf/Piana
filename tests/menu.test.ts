@@ -17,12 +17,14 @@ const { menuTemplate } = require("../electron/menu.cjs") as {
     mac: boolean;
     name: string;
     onOpen: () => void;
+    onLibrary: () => void;
     onAbout: () => void;
   }) => Item[];
 };
 
 const noop = () => {};
-const build = (mac: boolean) => menuTemplate({ mac, name: "Piana", onOpen: noop, onAbout: noop });
+const build = (mac: boolean) =>
+  menuTemplate({ mac, name: "Piana", onOpen: noop, onLibrary: noop, onAbout: noop });
 
 const titles = (menu: Item[]) => menu.map((m) => m.label);
 const find = (menu: Item[], label: string) => menu.find((m) => m.label === label);
@@ -83,6 +85,15 @@ describe("menuTemplate", () => {
       // CmdOrCtrl, not two entries: Electron resolves it per platform.
       expect(open?.accelerator).toBe("CmdOrCtrl+O");
       expect(typeof open?.click).toBe("function");
+    }
+  });
+
+  it("opens the song list from File on both, on its own key", () => {
+    for (const mac of [true, false]) {
+      const songs = find(build(mac), mac ? "File" : "&File")?.submenu?.[1];
+      expect(songs?.label).toBe("Songs…");
+      expect(songs?.accelerator).toBe("CmdOrCtrl+L");
+      expect(typeof songs?.click).toBe("function");
     }
   });
 

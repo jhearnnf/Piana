@@ -22,10 +22,11 @@
  * @param {object} options
  * @param {boolean} options.mac    build the macOS shape
  * @param {string} options.name    the app name, which labels the macOS app menu
- * @param {() => void} options.onOpen   File ▸ Open MIDI…
- * @param {() => void} options.onAbout  About Piana, wherever it ended up
+ * @param {() => void} options.onOpen     File ▸ Open MIDI…
+ * @param {() => void} options.onLibrary  File ▸ Songs…
+ * @param {() => void} options.onAbout    About Piana, wherever it ended up
  */
-function menuTemplate({ mac, name, onOpen, onAbout }) {
+function menuTemplate({ mac, name, onOpen, onLibrary, onAbout }) {
   const about = { label: 'About Piana', click: onAbout };
 
   const appMenu = {
@@ -65,6 +66,9 @@ function menuTemplate({ mac, name, onOpen, onAbout }) {
       label: mac ? 'File' : '&File',
       submenu: [
         { label: 'Open MIDI…', accelerator: 'CmdOrCtrl+O', click: onOpen },
+        // The list of what is already in the song folder, which is the route you want
+        // when the file you are after is one you have opened before.
+        { label: 'Songs…', accelerator: 'CmdOrCtrl+L', click: onLibrary },
         // Quit lives in the app menu on macOS, and putting it in both would
         // give Cmd+Q two owners.
         ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),

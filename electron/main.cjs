@@ -21,7 +21,8 @@ const path = require('path');
 const fs = require('fs');
 const { parseState, restoreState, MIN_SIZE } = require('./window-state.cjs');
 const { resolveAsset } = require('./serve.cjs');
-const { parsePrefs, startFolder } = require('./prefs.cjs');
+const { parsePrefs, songFolder, startFolder } = require('./prefs.cjs');
+const { listMidiNames, resolveInFolder } = require('./library.cjs');
 const { menuTemplate } = require('./menu.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -213,6 +214,53 @@ function openSong(file) {
   if (app.isReady() && BrowserWindow.getAllWindows().length === 0) createWindow();
 }
 
+/**
+ * Ask for a folder to keep MIDI files in, and remember it.
+ *
+ * The same preference the Open dialog starts from — choosing one here is choosing where
+ * the song list reads from and where the file picker opens, because those should never be
+ * two different answers. Cancelling changes nothing, and either way the caller gets a
+ * fresh listing back so the screen can just re-render whatever happened.
+ */
+async function chooseSongFolder() {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Choose your MIDI folder',
+    properties: ['openDirectory'],
+    defaultPath: startFolder(loadPrefs(), (p) => fs.existsSync(p), app.getPath('music')),
+  });
+  if (!res.canceled && res.filePaths.length) {
+    savePrefs({ ...(loadPrefs() ?? {}), songFolder: res.filePaths[0] });
+  }
+  return listSongFolder();
+}
+
+/**
+ * What is in the song folder right now.
+ *
+ * Read on every request rather than cached: files arrive in that folder from outside the
+ * app, and a list that needed a restart to notice a new download would be worse than no
+ * list. An unreadable folder — unplugged drive, revoked share — is reported rather than
+ * thrown, so the screen can say why it is empty.
+ */
+async function listSongFolder() {
+  const folder = songFolder(loadPrefs());
+  if (!folder) return { folder: null, files: [] };
+  try {
+    return { folder, files: listMidiNames(await fs.promises.readdir(folder)) };
+  } catch (err) {
+    return { folder, files: [], error: err.message };
+  }
+}
+
+/** Open one of the listed songs, by its file name. Returns false if it isn't one. */
+function openSongFromFolder(name) {
+  const folder = songFolder(loadPrefs());
+  const file = folder === null ? null : resolveInFolder(folder, name);
+  if (file === null) return false;
+  openSong(file);
+  return true;
+}
+
 async function pickSong() {
   const res = await dialog.showOpenDialog(win, {
     title: 'Open a MIDI file',
@@ -251,11 +299,17 @@ function showAbout() {
   });
 }
 
+/** Ask the renderer to put its song list up. The list itself lives in the app. */
+function showLibrary() {
+  if (win && !win.isDestroyed()) win.webContents.send('songs:show');
+}
+
 function buildMenu() {
   return Menu.buildFromTemplate(menuTemplate({
     mac: MAC,
     name: app.name,
     onOpen: () => void pickSong(),
+    onLibrary: showLibrary,
     onAbout: showAbout,
   }));
 }
@@ -440,3 +494,6 @@ if (!app.requestSingleInstanceLock()) {
 // ------------------------------------------------------------------ bridge
 
 ipcMain.handle('song:pick', () => pickSong());
+ipcMain.handle('songs:list', () => listSongFolder());
+ipcMain.handle('songs:folder', () => chooseSongFolder());
+ipcMain.handle('songs:open', (_event, name) => openSongFromFolder(name));

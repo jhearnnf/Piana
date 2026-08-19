@@ -1,6 +1,6 @@
-import type { Difficulty, HandSelection } from "../core/types.ts";
 import type { BestEntry, SongScores } from "../game/highScores.ts";
 import { starString } from "./resultsScreen.ts";
+import { dateLabel, escapeHtml, setupLabel } from "./format.ts";
 
 export interface ScoresCallbacks {
   /** Wipe every stored score. The screen closes itself afterwards. */
@@ -8,61 +8,14 @@ export interface ScoresCallbacks {
   onClose: () => void;
 }
 
-const DIFFICULTY_LABELS: Record<Difficulty, string> = {
-  easy: "Easy",
-  medium: "Medium",
-  hard: "Hard",
-};
-
-const HAND_LABELS: Record<HandSelection, string> = {
-  left: "Left hand",
-  both: "Both hands",
-  right: "Right hand",
-};
-
-/**
- * Human name for a stored section id.
- *
- * Sections are detected fresh from the MIDI each time it is loaded and are only ever
- * numbered, so the id is enough to name one without keeping the song around — which is
- * what lets the scores screen open with no song loaded at all.
- */
-export function sectionLabel(id: string): string {
-  if (id === "full") return "Full song";
-  const index = Number(id);
-  return Number.isInteger(index) ? `Section ${index + 1}` : id;
-}
-
-/** Escape text for interpolation into HTML. Song names come from user file names. */
-function escapeHtml(text: string): string {
-  return text.replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
-  );
-}
-
-function dateLabel(savedAt: number | null): string {
-  if (savedAt === null) return "";
-  return new Date(savedAt).toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
-
 function rowHtml(entry: BestEntry): string {
   const { ctx, result } = entry;
-  const setup = [
-    DIFFICULTY_LABELS[ctx.difficulty],
-    HAND_LABELS[ctx.hand],
-    sectionLabel(ctx.sectionId),
-  ].join(" · ");
 
   return `
     <li class="score-row">
       <span class="score-stars">${starString(result.stars)}</span>
       <span class="score-points">${result.score}</span>
-      <span class="score-setup">${escapeHtml(setup)}</span>
+      <span class="score-setup">${escapeHtml(setupLabel(ctx))}</span>
       <span class="score-accuracy">${Math.round(result.accuracy * 100)}%</span>
       <span class="score-date">${escapeHtml(dateLabel(entry.savedAt))}</span>
     </li>`;

@@ -27,7 +27,9 @@ import { elapsedInRange, formatTime, progressFraction } from "./progress.ts";
 import { showResults } from "./resultsScreen.ts";
 import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
-import { desktop } from "../desktop.ts";
+import { showLibrary, type LibraryView } from "./libraryScreen.ts";
+import { buildLibrary, songTitle } from "../song/library.ts";
+import { desktop, type PianaDesktop, type SongFolder } from "../desktop.ts";
 import {
   loadMidiDevice,
   loadMuted,
@@ -41,9 +43,6 @@ import {
   saveZoom,
 } from "./preferences.ts";
 
-/** Strip the extension off a file name to get a song title. */
-const songTitle = (fileName: string): string => fileName.replace(/\.midi?$/i, "");
-
 const MIDI_LABELS: Record<MidiStatus, string> = {
   unsupported: "🎹 MIDI: not supported (use Chrome/Edge)",
   unavailable: "🎹 MIDI: blocked",
@@ -55,47 +54,92 @@ const MIDI_LABELS: Record<MidiStatus, string> = {
 /** Menu value for "don't single out a device" — the empty string an `<option>` gives back. */
 const ALL_DEVICES = "";
 
+/**
+ * The chrome above the stage, in three strips, ordered by how often you touch them.
+ *
+ *  1. The bar — Play, and the things you reach for between songs. Play is the only
+ *     accent-filled control on the screen, because it is the one you press most and
+ *     everything else can afford to be quieter than it.
+ *  2. The settings — how *this* run is set up: hands, difficulty, section, wait, speed.
+ *     One row of same-height controls under small labels, with the two you set once and
+ *     forget (the keyboard size and which device to listen to) pushed to the far end.
+ *  3. The progress strip, sitting directly on the stage as a timeline of what is falling.
+ *
+ * There is no title band. It was fifty pixels saying the name of an app you already
+ * opened, taken off the runway the notes fall down.
+ */
 const TEMPLATE = `
-  <header class="piana-header">
-    🎹 Piana
-    <span class="tag">piano trainer</span>
-  </header>
-  <div class="piana-controls">
-    <label class="file-btn">Load MIDI…<input id="file" type="file" accept=".mid,.midi" /></label>
-    <button id="demo">Load demo</button>
-    <button id="play">▶ Play</button>
-    <button id="restart">⟲ Restart</button>
-    <label>Difficulty
-      <select id="difficulty">
-        <option value="easy">Easy</option>
-        <option value="medium">Medium</option>
-        <option value="hard" selected>Hard</option>
-      </select>
-    </label>
-    <span class="seg" id="hand">
-      <button data-hand="left">Left</button>
-      <button data-hand="both" class="active">Both</button>
-      <button data-hand="right">Right</button>
-    </span>
-    <label>Section
+  <div class="piana-bar">
+    <div class="bar-transport">
+      <button id="play" class="play-btn" type="button" disabled>▶ Play</button>
+      <button id="restart" class="icon-btn" type="button"
+              title="Start this run again" aria-label="Restart" disabled>⟲</button>
+    </div>
+
+    <div class="bar-song">
+      <span id="song-name" class="song-name">No song loaded</span>
+      <span id="song-meta" class="song-meta">Open a MIDI file to start</span>
+    </div>
+
+    <div class="bar-actions">
+      <button id="library" type="button" class="strong"
+              title="Songs in your MIDI folder (Ctrl+L)" hidden>📂 Songs</button>
+      <label class="file-btn">📄 Open…<input id="file" type="file" accept=".mid,.midi" /></label>
+      <button id="demo" type="button" title="Load the built-in demo song">🎵 Demo</button>
+      <button id="tracks" type="button" title="Which hand plays each track" disabled>🎼 Tracks</button>
+      <button id="scores" type="button" title="Best scores">🏆 Scores</button>
+    </div>
+
+    <div class="bar-output">
+      <button id="mute" type="button" class="icon-btn" aria-pressed="false"
+              aria-label="Mute" title="Mute">🔊</button>
+      <input id="volume" type="range" min="0" max="100" step="1" value="75"
+             aria-label="Volume" title="Volume" />
+      <span id="midi-status" class="midi-status">🎹 MIDI: …</span>
+    </div>
+  </div>
+
+  <div class="piana-settings">
+    <div class="setting">
+      <span class="setting-label" id="hand-label">Hands</span>
+      <span class="seg" id="hand" role="group" aria-labelledby="hand-label">
+        <button type="button" data-hand="left" aria-pressed="false">Left</button>
+        <button type="button" data-hand="both" class="active" aria-pressed="true">Both</button>
+        <button type="button" data-hand="right" aria-pressed="false">Right</button>
+      </span>
+    </div>
+
+    <div class="setting">
+      <span class="setting-label" id="difficulty-label">Difficulty</span>
+      <span class="seg" id="difficulty" role="group" aria-labelledby="difficulty-label">
+        <button type="button" data-difficulty="easy" aria-pressed="false">Easy</button>
+        <button type="button" data-difficulty="medium" aria-pressed="false">Medium</button>
+        <button type="button" data-difficulty="hard" class="active" aria-pressed="true">Hard</button>
+      </span>
+    </div>
+
+    <label class="setting">
+      <span class="setting-label">Section</span>
       <select id="section"><option value="full">Full song</option></select>
     </label>
-    <label><input type="checkbox" id="loop" /> Loop</label>
-    <label><input type="checkbox" id="wait" checked /> Wait mode</label>
-    <button id="tracks" type="button" title="Which hand plays each track" disabled>🎼 Tracks</button>
-    <button id="scores" type="button" title="Best scores">🏆 Scores</button>
-    <span class="volume">
-      <button id="mute" type="button" class="icon-btn" aria-pressed="false" aria-label="Mute" title="Mute">🔊</button>
-      <input id="volume" type="range" min="0" max="100" step="1" value="75" aria-label="Volume" title="Volume" />
-    </span>
-    <label>Speed
-      <select id="speed">
-        <option value="0.5">0.5×</option>
-        <option value="0.75">0.75×</option>
-        <option value="1" selected>1×</option>
-      </select>
-    </label>
-    <label>Keys
+
+    <div class="toggles">
+      <label class="chip"><input type="checkbox" id="wait" checked /> Wait mode</label>
+      <label class="chip"><input type="checkbox" id="loop" /> Loop</label>
+    </div>
+
+    <div class="setting">
+      <span class="setting-label" id="speed-label">Speed</span>
+      <span class="seg" id="speed" role="group" aria-labelledby="speed-label">
+        <button type="button" data-rate="0.5" aria-pressed="false">0.5×</button>
+        <button type="button" data-rate="0.75" aria-pressed="false">0.75×</button>
+        <button type="button" data-rate="1" class="active" aria-pressed="true">1×</button>
+      </span>
+    </div>
+
+    <div class="setting-rare">
+    <label class="setting">
+      <span class="setting-label">Keys</span>
       <select id="zoom">
         <option value="auto" selected>Auto</option>
         <option value="1">1 octave</option>
@@ -105,14 +149,16 @@ const TEMPLATE = `
         <option value="full">Full 88</option>
       </select>
     </label>
-    <span id="song-name" class="song-name">No song loaded</span>
-    <label id="midi-device-row" hidden>Input
+
+    <label class="setting" id="midi-device-row" hidden>
+      <span class="setting-label">Input</span>
       <select id="midi-device" title="Which MIDI device to listen to">
         <option value="">All devices</option>
       </select>
     </label>
-    <span id="midi-status" class="midi-status">🎹 MIDI: …</span>
+    </div>
   </div>
+
   <div class="piana-progress" id="progress" hidden>
     <span class="time" id="time-now">0:00</span>
     <div class="progress-track" id="progress-track" role="progressbar"
@@ -178,6 +224,7 @@ export class App {
       section: root.querySelector("#section")!,
       loop: root.querySelector("#loop")!,
       wait: root.querySelector("#wait")!,
+      library: root.querySelector("#library")!,
       tracks: root.querySelector("#tracks")!,
       scores: root.querySelector("#scores")!,
       speed: root.querySelector("#speed")!,
@@ -185,6 +232,7 @@ export class App {
       volume: root.querySelector("#volume")!,
       zoom: root.querySelector("#zoom")!,
       songName: root.querySelector("#song-name")!,
+      songMeta: root.querySelector("#song-meta")!,
       midiDevice: root.querySelector("#midi-device")!,
       midiDeviceRow: root.querySelector("#midi-device-row")!,
       midiStatus: root.querySelector("#midi-status")!,
@@ -294,8 +342,8 @@ export class App {
       this.updatePlayButton();
     });
 
-    (this.el.difficulty as HTMLSelectElement).addEventListener("change", (e) => {
-      this.difficulty = (e.target as HTMLSelectElement).value as Difficulty;
+    this.wireSegment(this.el.difficulty!, "difficulty", (value) => {
+      this.difficulty = value as Difficulty;
       this.rebuild();
     });
     (this.el.wait as HTMLInputElement).addEventListener("change", (e) => {
@@ -313,11 +361,8 @@ export class App {
       this.selectSection((e.target as HTMLSelectElement).value);
       this.rebuild();
     });
-    this.el.hand!.addEventListener("click", (e) => {
-      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-hand]");
-      if (!btn) return;
-      this.hand = btn.dataset.hand as HandSelection;
-      for (const b of this.el.hand!.querySelectorAll("button")) b.classList.toggle("active", b === btn);
+    this.wireSegment(this.el.hand!, "hand", (value) => {
+      this.hand = value as HandSelection;
       this.rebuild();
     });
     this.el.mute!.addEventListener("click", () => {
@@ -335,8 +380,8 @@ export class App {
         saveMuted(false);
       }
     });
-    (this.el.speed as HTMLSelectElement).addEventListener("change", (e) => {
-      const rate = Number((e.target as HTMLSelectElement).value);
+    this.wireSegment(this.el.speed!, "rate", (value) => {
+      const rate = Number(value);
       this.conductor.rate = rate;
       this.autoPlayer.setRate(rate);
     });
@@ -345,6 +390,27 @@ export class App {
       this.zoom = value === "auto" || value === "full" ? value : Number(value);
       saveZoom(this.zoom);
       this.applyVisibleRange();
+    });
+  }
+
+  /**
+   * Wire a segmented control: click a button, it becomes the chosen one.
+   *
+   * Hands, difficulty and speed are all "pick one of three", and a row of buttons showing
+   * all three answers at once beats a dropdown that shows one and hides the rest behind a
+   * click — these are settings you change while looking at the stage, not ones you go
+   * hunting for. `key` is the data attribute the buttons carry their value in.
+   */
+  private wireSegment(group: HTMLElement, key: string, onPick: (value: string) => void): void {
+    group.addEventListener("click", (e) => {
+      const picked = (e.target as HTMLElement).closest<HTMLButtonElement>(`button[data-${key}]`);
+      if (!picked || picked.classList.contains("active")) return;
+      for (const button of group.querySelectorAll("button")) {
+        const on = button === picked;
+        button.classList.toggle("active", on);
+        button.setAttribute("aria-pressed", String(on));
+      }
+      onPick(picked.dataset[key]!);
     });
   }
 
@@ -474,6 +540,11 @@ export class App {
    * The hidden `<input type="file">` is swapped for the shell's native picker:
    * it remembers the last folder used and is the same dialog the File menu and
    * Ctrl+O open, so all three routes behave identically.
+   *
+   * The Songs button appears here too rather than in the template, because the list it
+   * opens is a list of a folder — and a browser tab has no folder to list. A button that
+   * was always there and only worked in one of the two builds would be the worse half of
+   * "one codebase, two ways to run it".
    */
   private wireDesktop(root: HTMLElement): void {
     const shell = desktop();
@@ -481,14 +552,48 @@ export class App {
 
     shell.onOpenSong(({ name, data }) => this.loadSong(data, name));
 
+    this.el.library!.hidden = false;
+    this.el.library!.addEventListener("click", () => void this.openLibrary(shell));
+    shell.onShowSongs(() => void this.openLibrary(shell)); // File ▸ Songs… (Ctrl+L)
+
     const picker = root.querySelector<HTMLElement>(".file-btn");
     if (!picker) return;
 
     const button = document.createElement("button");
     button.id = "open";
-    button.textContent = "Load MIDI…";
+    button.textContent = "📄 Open…";
     button.addEventListener("click", () => void shell.pickSong());
     picker.replaceWith(button);
+  }
+
+  /**
+   * Show what is in the song folder, with what you have scored on each.
+   *
+   * The folder is read fresh every time it is opened — files land in a music folder from
+   * outside the app — and the scores are read fresh with it, so a run you finished a
+   * moment ago is already on the row when you come back to pick the next song.
+   *
+   * Same pause-while-open as the other screens: a run left going behind the overlay just
+   * quietly racks up misses.
+   */
+  private async openLibrary(shell: PianaDesktop): Promise<void> {
+    if (this.conductor.isPlaying()) {
+      this.conductor.pause();
+      this.updatePlayButton();
+    }
+    const view = (folder: SongFolder): LibraryView => ({
+      folder: folder.folder,
+      songs: buildLibrary(folder.files, groupBySong(listBests())),
+      ...(folder.error === undefined ? {} : { error: folder.error }),
+    });
+
+    showLibrary(view(await shell.listSongs()), this.baseSong?.name ?? null, {
+      // The song comes back through `onOpenSong` like every other route into the app,
+      // which is what starts it playing — nothing to do here but ask.
+      onOpen: (file) => void shell.openSongNamed(file),
+      onChooseFolder: async () => view(await shell.chooseSongFolder()),
+      onClose: () => {},
+    });
   }
 
   private loadSong(buffer: ArrayBuffer, name: string): void {
@@ -503,6 +608,7 @@ export class App {
       void this.startPlaying();
     } catch (err) {
       this.el.songName!.textContent = "Could not read that MIDI file";
+      this.el.songMeta!.textContent = "";
       console.error(err);
     }
   }
@@ -574,7 +680,8 @@ export class App {
       waitMode: this.waitMode,
       loop: this.loop,
     });
-    this.el.songName!.textContent = `${song.name} — ${song.notes.length} notes`;
+    this.el.songName!.textContent = song.name;
+    this.el.songMeta!.textContent = `${song.notes.length} notes`;
     this.updatePlayButton();
     this.setRunRange(song);
   }
@@ -655,6 +762,12 @@ export class App {
       : running
         ? "▶ Resume"
         : "▶ Play";
+
+    // Both do nothing at all until there is a song. A button that looks live and answers a
+    // click with silence is the one thing worse than a greyed-out one.
+    const ready = this.baseSong !== null;
+    (this.el.play as HTMLButtonElement).disabled = !ready;
+    (this.el.restart as HTMLButtonElement).disabled = !ready;
   }
 
   private handleFinish(result: import("../game/Scoring.ts").ScoreResult): void {

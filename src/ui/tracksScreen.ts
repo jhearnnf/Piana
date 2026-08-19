@@ -1,6 +1,7 @@
 import type { Song } from "../core/types.ts";
 import { handTally, type HandMode } from "../song/handModes.ts";
 import { noteLabel } from "../render/PianoRenderer.ts";
+import { escapeHtml } from "./format.ts";
 
 export interface TracksCallbacks {
   /** A track's mode changed. The caller re-splits and re-renders, then this screen refreshes. */
@@ -13,14 +14,6 @@ const MODE_LABELS: Record<HandMode, string> = {
   left: "Left hand",
   right: "Right hand",
 };
-
-/** Escape text for interpolation into HTML. Track names come from the file. */
-function escapeHtml(text: string): string {
-  return text.replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
-  );
-}
 
 /**
  * How the split came out for one track, as a sentence rather than two numbers.
