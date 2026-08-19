@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   groupBySong,
   parseScoreKey,
+  repairResult,
   scoreKey,
   type BestEntry,
   type ScoreContext,
@@ -67,5 +68,32 @@ describe("groupBySong", () => {
 
   it("has nothing to show when nothing has been played", () => {
     expect(groupBySong([])).toEqual([]);
+  });
+});
+
+describe("repairResult", () => {
+  const stored = (over: Partial<ScoreResult>): ScoreResult =>
+    ({ totalNotes: 10, perfect: 8, good: 2, missed: 0, wrong: 0, accuracy: 1, stars: 3, ...over }) as ScoreResult;
+
+  it("recounts an old 100% that ignored its wrong notes", () => {
+    // 10 expected notes all hit, plus 2 wrong keys: 10 right out of 12 events judged.
+    const fixed = repairResult(stored({ wrong: 2 }));
+    expect(fixed.accuracy).toBeCloseTo(10 / 12);
+    expect(fixed.stars).toBe(2); // no longer the 3 stars it was saved with
+  });
+
+  it("leaves a genuinely clean run at 100%", () => {
+    expect(repairResult(stored({})).accuracy).toBe(1);
+    expect(repairResult(stored({})).stars).toBe(3);
+  });
+
+  it("keeps the points, which never counted wrong notes twice", () => {
+    const fixed = repairResult(stored({ wrong: 5, score: 740 }));
+    expect(fixed.score).toBe(740);
+  });
+
+  it("passes through a record missing its tallies rather than inventing one", () => {
+    const partial = { score: 500, accuracy: 1, stars: 3 } as ScoreResult;
+    expect(repairResult(partial)).toEqual(partial);
   });
 });

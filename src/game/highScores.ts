@@ -1,4 +1,5 @@
 import type { Difficulty, HandSelection } from "../core/types.ts";
+import { starsFor } from "./Scoring.ts";
 import type { ScoreResult } from "./Scoring.ts";
 
 /**
@@ -73,11 +74,30 @@ export function parseScoreKey(key: string): ScoreContext | null {
   }
 }
 
+/**
+ * Recompute a stored result's accuracy and stars from its own counts.
+ *
+ * Runs saved before accuracy counted wrong notes recorded (perfect + good) / expected
+ * notes, which in wait mode is always 1 — so those bests all read 100% however many wrong
+ * keys were hit. Every record keeps its raw tallies, so the honest figure can be recomputed
+ * exactly rather than guessed at; applied on read, this corrects old entries and leaves new
+ * ones unchanged. A record missing a tally is passed through as it is, since there is
+ * nothing to recompute from.
+ */
+export function repairResult(stored: ScoreResult): ScoreResult {
+  const counts = [stored.perfect, stored.good, stored.totalNotes, stored.wrong];
+  if (counts.some((n) => typeof n !== "number")) return stored;
+
+  const judged = stored.totalNotes + stored.wrong;
+  const accuracy = judged === 0 ? 0 : (stored.perfect + stored.good) / judged;
+  return { ...stored, accuracy, stars: starsFor(accuracy) };
+}
+
 /** Read the stored best score for this setup, or null. */
 export function getBest(ctx: ScoreContext): ScoreResult | null {
   try {
     const raw = localStorage.getItem(scoreKey(ctx));
-    return raw ? (JSON.parse(raw) as ScoreResult) : null;
+    return raw ? repairResult(JSON.parse(raw) as ScoreResult) : null;
   } catch {
     return null;
   }
@@ -111,7 +131,7 @@ export function listBests(): BestEntry[] {
       if (!raw) continue;
       const stored = JSON.parse(raw) as StoredBest;
       if (typeof stored?.score !== "number") continue; // not a score record after all
-      entries.push({ ctx, result: stored, savedAt: stored.savedAt ?? null });
+      entries.push({ ctx, result: repairResult(stored), savedAt: stored.savedAt ?? null });
     }
   } catch {
     return entries; // storage unavailable or a corrupt record — show what we have
