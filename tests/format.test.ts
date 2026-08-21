@@ -3,6 +3,7 @@ import type { ScoreContext } from "../src/game/highScores.ts";
 import {
   dateLabel,
   escapeHtml,
+  formatTime,
   sectionLabel,
   setupLabel,
   shortSetupLabel,
@@ -41,6 +42,11 @@ describe("sectionLabel", () => {
 
   it("shows an unrecognised id rather than inventing a name for it", () => {
     expect(sectionLabel("chorus")).toBe("chorus");
+  });
+
+  it("names a hand-picked loop region by the times it runs between", () => {
+    expect(sectionLabel("loop:12.00-34.50")).toBe("Loop 0:12–0:34");
+    expect(sectionLabel("loop:75.00-140.00")).toBe("Loop 1:15–2:20");
   });
 });
 
@@ -95,5 +101,28 @@ describe("countLabel", () => {
     expect(countLabel({ folder: null, songs: [] }, 0)).toBe("");
     expect(countLabel({ folder: "/music", songs, error: "ENOENT" }, 3)).toBe("");
     expect(countLabel({ folder: "/music", songs: [] }, 0)).toBe("");
+  });
+});
+
+describe("formatTime", () => {
+  it("writes minutes and seconds", () => {
+    expect(formatTime(0)).toBe("0:00");
+    expect(formatTime(9)).toBe("0:09");
+    expect(formatTime(95)).toBe("1:35");
+  });
+
+  it("rounds down, so it cannot read as finished while notes are still coming", () => {
+    expect(formatTime(59.9)).toBe("0:59");
+  });
+
+  it("grows an hours field only when there is one", () => {
+    expect(formatTime(3599)).toBe("59:59");
+    expect(formatTime(3600)).toBe("1:00:00");
+    expect(formatTime(3661)).toBe("1:01:01");
+  });
+
+  it("survives the values a broken clock would hand it", () => {
+    expect(formatTime(-5)).toBe("0:00");
+    expect(formatTime(NaN)).toBe("0:00");
   });
 });

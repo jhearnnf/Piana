@@ -1,5 +1,6 @@
 import type { Difficulty, HandSelection } from "../core/types.ts";
 import type { ScoreContext } from "../game/highScores.ts";
+import { parseLoopSectionId } from "../song/loopRegion.ts";
 
 /**
  * The small pieces of text every screen needs to say the same way.
@@ -8,6 +9,20 @@ import type { ScoreContext } from "../game/highScores.ts";
  * screen and the song list alike, and a song's name arrives from a file name in all three.
  * Naming the same thing two ways in two places is how a UI starts to feel like two UIs.
  */
+
+/**
+ * Seconds as `m:ss`, growing to `h:mm:ss` only once there is an hour to show.
+ *
+ * Rounded down so a clock never reads as finished while notes are still coming.
+ */
+export function formatTime(seconds: number): string {
+  const total = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const secs = total % 60;
+  const mins = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  return hours > 0 ? `${hours}:${pad(mins)}:${pad(secs)}` : `${mins}:${pad(secs)}`;
+}
 
 /** Escape text for interpolation into HTML. Song and track names come from files. */
 export function escapeHtml(text: string): string {
@@ -34,10 +49,14 @@ export const HAND_LABELS: Record<HandSelection, string> = {
  *
  * Sections are detected fresh from the MIDI each time it is loaded and are only ever
  * numbered, so the id is enough to name one without keeping the song around — which is
- * what lets the scores screen open with no song loaded at all.
+ * what lets the scores screen open with no song loaded at all. A hand-picked loop region
+ * carries its own times for the same reason: it belongs to no list the app could look it
+ * up in, so it says what it is.
  */
 export function sectionLabel(id: string): string {
   if (id === "full") return "Full song";
+  const loop = parseLoopSectionId(id);
+  if (loop) return `Loop ${formatTime(loop.start)}–${formatTime(loop.end)}`;
   const index = Number(id);
   return Number.isInteger(index) ? `Section ${index + 1}` : id;
 }

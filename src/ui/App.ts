@@ -23,7 +23,26 @@ import {
 import { applyDifficulty } from "../song/difficulty.ts";
 import { applyHandModes, defaultHandModes, type HandMode } from "../song/handModes.ts";
 import { detectSections, fullSongSection, type Section } from "../song/sections.ts";
-import { elapsedInRange, formatTime, progressFraction } from "./progress.ts";
+import {
+  loopSectionId,
+  markedRegion,
+  marksOf,
+  moveMark,
+  placeMark,
+  NO_MARKS,
+  type LoopMarks,
+} from "../song/loopRegion.ts";
+import { ScrubInput } from "../input/ScrubInput.ts";
+import { clampToSong } from "../input/scrub.ts";
+import { MarkerDrag } from "../input/MarkerDrag.ts";
+import { TimelineInput } from "../input/TimelineInput.ts";
+import {
+  DEFAULT_TIMELINE_HEIGHT,
+  MAX_TIMELINE_HEIGHT,
+  MIN_TIMELINE_HEIGHT,
+  TimelineRenderer,
+} from "../render/TimelineRenderer.ts";
+import { formatTime, sectionLabel } from "./format.ts";
 import { showResults } from "./resultsScreen.ts";
 import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
@@ -36,8 +55,10 @@ import {
   loadVolume,
   loadWaitMode,
   loadZoom,
+  loadTimelineHeight,
   saveMidiDevice,
   saveMuted,
+  saveTimelineHeight,
   saveVolume,
   saveWaitMode,
   saveZoom,
@@ -54,6 +75,13 @@ const MIDI_LABELS: Record<MidiStatus, string> = {
 /** Menu value for "don't single out a device" — the empty string an `<option>` gives back. */
 const ALL_DEVICES = "";
 
+/** Menu value for the region marked by hand, which joins the section list once it exists. */
+const MARKED_SECTION = "marked";
+
+/** How far an arrow key moves the playhead along the timeline, in seconds. Shift goes further. */
+const KEY_SEEK_STEP = 2;
+const KEY_SEEK_COARSE = 15;
+
 /**
  * The chrome above the stage, in three strips, ordered by how often you touch them.
  *
@@ -63,7 +91,11 @@ const ALL_DEVICES = "";
  *  2. The settings — how *this* run is set up: hands, difficulty, section, wait, speed.
  *     One row of same-height controls under small labels, with the two you set once and
  *     forget (the keyboard size and which device to listen to) pushed to the far end.
- *  3. The progress strip, sitting directly on the stage as a timeline of what is falling.
+ *  3. The timeline, sitting directly on the stage: the whole song drawn small, so the
+ *     shape of the piece and where you are in it are one picture. Click it to go there.
+ *     Its head carries the clock and the two loop points — the only controls on the screen
+ *     about a moment in the song rather than about the run as a whole — and its foot is a
+ *     grip for how much room the map gets.
  *
  * There is no title band. It was fifty pixels saying the name of an app you already
  * opened, taken off the runway the notes fall down.
@@ -128,14 +160,12 @@ const TEMPLATE = `
       <label class="chip"><input type="checkbox" id="loop" /> Loop</label>
     </div>
 
-    <div class="setting">
-      <span class="setting-label" id="speed-label">Speed</span>
-      <span class="seg" id="speed" role="group" aria-labelledby="speed-label">
-        <button type="button" data-rate="0.5" aria-pressed="false">0.5×</button>
-        <button type="button" data-rate="0.75" aria-pressed="false">0.75×</button>
-        <button type="button" data-rate="1" class="active" aria-pressed="true">1×</button>
-      </span>
-    </div>
+    <label class="setting">
+      <span class="setting-label">Speed</span>
+      <input id="speed" class="speed-slider" type="range" min="25" max="200" step="5" value="100"
+             aria-label="Speed" title="Playback speed" />
+      <output id="speed-value" class="speed-value" for="speed">100%</output>
+    </label>
 
     <div class="setting-rare">
     <label class="setting">
@@ -159,16 +189,32 @@ const TEMPLATE = `
     </div>
   </div>
 
-  <div class="piana-progress" id="progress" hidden>
-    <span class="time" id="time-now">0:00</span>
-    <div class="progress-track" id="progress-track" role="progressbar"
-         aria-label="Song progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-      <div class="progress-fill" id="progress-fill"></div>
+  <div class="piana-timeline" id="progress" hidden>
+    <div class="timeline-head">
+      <span class="time" id="time-now">0:00</span>
+      <span class="progress-scope" id="progress-scope"></span>
+      <span class="loop-marks" role="group" aria-labelledby="loop-marks-label">
+        <span class="setting-label" id="loop-marks-label">Loop</span>
+        <button id="mark-start" type="button" class="mark-btn" disabled
+                title="Start the loop at the hit line ( [ )">⟦ Set start</button>
+        <button id="mark-end" type="button" class="mark-btn" disabled
+                title="End the loop at the top of the stage ( ] )">Set end ⟧</button>
+        <button id="mark-clear" type="button" class="mark-btn clear" disabled
+                title="Back to the whole song ( \\ )" aria-label="Clear the loop region">✕</button>
+      </span>
+      <span class="time" id="time-total">0:00</span>
     </div>
-    <span class="time" id="time-total">0:00</span>
-    <span class="progress-scope" id="progress-scope"></span>
+    <div class="timeline-body">
+      <canvas id="timeline" tabindex="0" role="slider" aria-label="Song position"
+              aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"
+              title="Click or drag to move through the song"></canvas>
+    </div>
+    <div class="timeline-grip" id="timeline-grip"
+         title="Drag to make the song map taller or shorter"></div>
   </div>
-  <div class="piana-stage"><canvas id="stage"></canvas></div>
+  <div class="piana-stage">
+    <canvas id="stage" title="Scroll — or drag with the middle button — to move through the song"></canvas>
+  </div>
 `;
 
 /**
@@ -179,6 +225,7 @@ const TEMPLATE = `
  */
 export class App {
   private readonly renderer: PianoRenderer;
+  private readonly timeline: TimelineRenderer;
   private readonly conductor = new Conductor();
   private readonly audio = new PianoAudioPlayer();
   private readonly autoPlayer = new AutoPlayer(this.audio);
@@ -200,17 +247,32 @@ export class App {
   private muted = false;
   private range: TimeRange | null = null;
   private sectionId = "full";
+  /**
+   * The two loop points as they stand, which is not the same as {@link range}: a start
+   * dropped on its own is a marker on the stage and nothing more until its partner lands.
+   */
+  private marks: LoopMarks = NO_MARKS;
+  /**
+   * True while a marker is being dragged.
+   *
+   * The stage stops wrapping the loop for as long as it is, so the point can be aimed
+   * against the music that is really either side of it rather than against a ribbon of
+   * repeats that would slide about under the hand moving it.
+   */
+  private tuningMark = false;
+  /** Whether a seek that is under way interrupted playback, and so should give it back. */
+  private resumeAfterSeek = false;
+  private timelineHeight = DEFAULT_TIMELINE_HEIGHT;
   private wasPlaying = false;
-  /** The stretch of song the current run covers — the section, or all of it. */
-  private runRange: TimeRange | null = null;
-  /** Last strings written to the progress readout, so the frame loop can skip no-op writes. */
+  /** Last clock written to the readout, so the frame loop can skip no-op writes. */
   private shownTime = "";
-  private shownPercent = -1;
 
   constructor(root: HTMLElement) {
     root.innerHTML = TEMPLATE;
     const canvas = root.querySelector<HTMLCanvasElement>("#stage")!;
+    const timelineCanvas = root.querySelector<HTMLCanvasElement>("#timeline")!;
     this.renderer = new PianoRenderer(canvas);
+    this.timeline = new TimelineRenderer(timelineCanvas);
     this.session = new GameSession(this.conductor, this.autoPlayer);
     this.session.onFinish = (result) => this.handleFinish(result);
 
@@ -228,6 +290,7 @@ export class App {
       tracks: root.querySelector("#tracks")!,
       scores: root.querySelector("#scores")!,
       speed: root.querySelector("#speed")!,
+      speedValue: root.querySelector("#speed-value")!,
       mute: root.querySelector("#mute")!,
       volume: root.querySelector("#volume")!,
       zoom: root.querySelector("#zoom")!,
@@ -237,9 +300,12 @@ export class App {
       midiDeviceRow: root.querySelector("#midi-device-row")!,
       midiStatus: root.querySelector("#midi-status")!,
       progress: root.querySelector("#progress")!,
-      progressTrack: root.querySelector("#progress-track")!,
-      progressFill: root.querySelector("#progress-fill")!,
       progressScope: root.querySelector("#progress-scope")!,
+      timeline: root.querySelector("#timeline")!,
+      timelineGrip: root.querySelector("#timeline-grip")!,
+      markStart: root.querySelector("#mark-start")!,
+      markEnd: root.querySelector("#mark-end")!,
+      markClear: root.querySelector("#mark-clear")!,
       timeNow: root.querySelector("#time-now")!,
       timeTotal: root.querySelector("#time-total")!,
     };
@@ -251,12 +317,15 @@ export class App {
     this.setVolume(loadVolume());
     this.setMuted(loadMuted());
     this.setWaitMode(loadWaitMode());
+    this.setTimelineHeight(loadTimelineHeight());
     this.wireInputs(canvas);
+    this.wireTimeline(timelineCanvas);
     this.wireControls();
     this.wireDropTarget(root);
     this.wireDesktop(root);
 
     new ResizeObserver(() => this.renderer.resize()).observe(canvas.parentElement!);
+    new ResizeObserver(() => this.timeline.resize()).observe(timelineCanvas.parentElement!);
     requestAnimationFrame(this.frame);
   }
 
@@ -277,6 +346,21 @@ export class App {
     };
     new ComputerKeyboardInput().connect(handler);
     new PointerInput(canvas, this.renderer).connect(handler);
+    new ScrubInput(
+      canvas,
+      (deltaSec) => this.scrub(deltaSec),
+      () => this.renderer.secondsPerPixel(),
+    ).connect();
+    new MarkerDrag(canvas, this.renderer, {
+      marks: () => this.marks,
+      nowSec: () => this.conductor.time,
+      onGrab: () => (this.tuningMark = true),
+      onMove: (which, time) => this.moveLoopMark(which, time),
+      onSettle: () => {
+        this.tuningMark = false;
+        this.settleLoopMarks();
+      },
+    }).connect();
 
     const midi = new MidiInput();
     midi.onStatus = (state) => this.showMidiState(state);
@@ -354,13 +438,17 @@ export class App {
     this.el.scores!.addEventListener("click", () => this.openScores());
     this.el.tracks!.addEventListener("click", () => this.openTracks());
     (this.el.loop as HTMLInputElement).addEventListener("change", (e) => {
-      this.loop = (e.target as HTMLInputElement).checked;
+      this.setLoop((e.target as HTMLInputElement).checked);
       this.rebuild();
     });
     (this.el.section as HTMLSelectElement).addEventListener("change", (e) => {
       this.selectSection((e.target as HTMLSelectElement).value);
       this.rebuild();
     });
+    this.el.markStart!.addEventListener("click", () => this.placeLoopMark("start"));
+    this.el.markEnd!.addEventListener("click", () => this.placeLoopMark("end"));
+    this.el.markClear!.addEventListener("click", () => this.clearLoopMarks());
+    this.wireLoopKeys();
     this.wireSegment(this.el.hand!, "hand", (value) => {
       this.hand = value as HandSelection;
       this.rebuild();
@@ -380,10 +468,8 @@ export class App {
         saveMuted(false);
       }
     });
-    this.wireSegment(this.el.speed!, "rate", (value) => {
-      const rate = Number(value);
-      this.conductor.rate = rate;
-      this.autoPlayer.setRate(rate);
+    (this.el.speed as HTMLInputElement).addEventListener("input", (e) => {
+      this.setRate(Number((e.target as HTMLInputElement).value) / 100);
     });
     (this.el.zoom as HTMLSelectElement).addEventListener("change", (e) => {
       const value = (e.target as HTMLSelectElement).value;
@@ -394,10 +480,243 @@ export class App {
   }
 
   /**
+   * The song map: click it to go there, and drag its bottom edge to give it more room.
+   *
+   * Seeking runs through the same {@link seekTo} as the wheel over the stage, so there is
+   * one answer in the app to "put the run here" no matter which surface asked for it.
+   */
+  private wireTimeline(canvas: HTMLCanvasElement): void {
+    new TimelineInput(canvas, {
+      onGrab: () => {
+        this.resumeAfterSeek = this.conductor.isPlaying();
+        this.conductor.pause();
+      },
+      onSeek: (x) => this.seekTo(this.timeline.timeAtX(x)),
+      onRelease: () => {
+        // Handed back only if it was playing when it was taken: a click on the map while
+        // paused is a look at a passage, and should not start the song.
+        if (this.resumeAfterSeek) this.conductor.play();
+        this.resumeAfterSeek = false;
+        this.updatePlayButton();
+      },
+    }).connect();
+
+    // The map is a slider, so it answers the keys a slider answers. It has to be reachable
+    // by keyboard at all for the click-to-jump to have any equivalent without a mouse.
+    canvas.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? KEY_SEEK_COARSE : KEY_SEEK_STEP;
+      const to =
+        e.key === "ArrowRight" ? this.conductor.time + step
+        : e.key === "ArrowLeft" ? this.conductor.time - step
+        : e.key === "Home" ? 0
+        : e.key === "End" ? this.timeline.durationSec
+        : null;
+      if (to === null) return;
+      e.preventDefault();
+      this.seekTo(to);
+    });
+
+    this.wireTimelineGrip();
+  }
+
+  /**
+   * Drag the foot of the timeline to change how much song is on screen.
+   *
+   * How tall the map wants to be is a question about the piece and the screen it is on,
+   * not one the app can answer once for everybody: a two-line study needs a sliver, and
+   * picking a passage out of a five-minute piece wants every pixel it can get.
+   */
+  private wireTimelineGrip(): void {
+    const grip = this.el.timelineGrip!;
+    let fromY = 0;
+    let fromHeight = 0;
+
+    grip.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      fromY = e.clientY;
+      fromHeight = this.timelineHeight;
+      grip.setPointerCapture(e.pointerId);
+      grip.classList.add("dragging");
+    });
+    grip.addEventListener("pointermove", (e) => {
+      if (grip.hasPointerCapture(e.pointerId)) this.setTimelineHeight(fromHeight + (e.clientY - fromY));
+    });
+    const letGo = (e: PointerEvent) => {
+      if (!grip.hasPointerCapture(e.pointerId)) return;
+      grip.releasePointerCapture(e.pointerId);
+      grip.classList.remove("dragging");
+      saveTimelineHeight(this.timelineHeight); // stored once, not on every pixel of the drag
+    };
+    grip.addEventListener("pointerup", letGo);
+    grip.addEventListener("pointercancel", letGo);
+  }
+
+  /** Set the height of the song map, within what the map can usefully be drawn at. */
+  private setTimelineHeight(height: number): void {
+    this.timelineHeight = Math.min(MAX_TIMELINE_HEIGHT, Math.max(MIN_TIMELINE_HEIGHT, Math.round(height)));
+    (this.el.timeline as HTMLElement).style.height = `${this.timelineHeight}px`;
+    this.timeline.resize();
+  }
+
+  /**
+   * Keys for the loop points: `[` opens the region, `]` closes it, `\` throws it away.
+   *
+   * The brackets because that is what every editor with an in-point and an out-point has
+   * used for thirty years, and because the letters are all piano — a shortcut on `s` would
+   * be a shortcut that plays a D.
+   */
+  private wireLoopKeys(): void {
+    window.addEventListener("keydown", (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+      if (document.querySelector(".results-overlay")) return; // a screen is up over the stage
+
+      // Deliberately not skipped when the focus is inside a control. Nothing on this app
+      // takes typing — the settings are checkboxes, sliders and menus, none of which have
+      // any use for a bracket — and a shortcut that quietly stopped working because you
+      // last touched the section dropdown is a shortcut nobody trusts twice.
+      if (e.key === "[") this.placeLoopMark("start");
+      else if (e.key === "]") this.placeLoopMark("end");
+      else if (e.key === "\\") this.clearLoopMarks();
+      else return;
+      e.preventDefault();
+    });
+  }
+
+  /**
+   * Scroll the track by `deltaSec`.
+   *
+   * Playing stops the moment you take hold of the music. A clock still running underneath
+   * a track being scrolled would fight the scroll for the playhead and would sound notes
+   * at whatever speed your hand happened to move — and you are scrolling precisely because
+   * you want to look at a passage rather than hear it go by.
+   */
+  private scrub(deltaSec: number): void {
+    if (this.conductor.isPlaying()) this.conductor.pause();
+    this.seekTo(this.conductor.time + deltaSec);
+  }
+
+  /**
+   * Put the run at `seconds`. Every way of moving through the song ends up here — the
+   * wheel, the middle-button drag, a click on the map, the arrow keys.
+   */
+  private seekTo(seconds: number): void {
+    const song = this.practiceSong();
+    if (!song) return;
+    this.session.seek(clampToSong(seconds, song.durationSec));
+    this.updatePlayButton();
+  }
+
+  /**
+   * Drop a loop marker.
+   *
+   * The start goes on the hit line, where the music you can hear is. The end goes on the
+   * top edge of the stage, because that is where a passage *finishes*: the notes between
+   * the two are exactly the ones on screen, so a region no longer than the look-ahead is
+   * framed whole at the moment you close it, and scrolling until the last note you want
+   * is about to come into view is the same gesture as marking it.
+   *
+   * A region completed this way turns Loop on, because marking one out by hand is not
+   * something anybody does for a single play-through.
+   */
+  private placeLoopMark(which: "start" | "end"): void {
+    const song = this.practiceSong();
+    if (!song) return;
+    const now = this.conductor.time;
+    const at = which === "end" ? this.renderer.timeAtTop(now) : now;
+    this.marks = placeMark(this.marks, which, clampToSong(at, song.durationSec));
+
+    if (markedRegion(this.marks)) this.settleLoopMarks();
+    // Only one point down: the other is still somewhere further through the song. There
+    // is nothing to practise yet, so whatever range was being practised is given up — but
+    // the track stays exactly where your hand left it, because you are in the middle of
+    // looking for the second point and being thrown back to the start would end the search.
+    else this.dropRange(now);
+  }
+
+  /**
+   * Slide a marker that is being dragged.
+   *
+   * Shown immediately and applied to nothing: the region is only handed to the session
+   * when the button comes up. Re-configuring the run on every pixel would restart it sixty
+   * times a second underneath the hand doing the dragging.
+   */
+  private moveLoopMark(which: "start" | "end", time: number): void {
+    const song = this.practiceSong();
+    if (!song) return;
+    this.marks = moveMark(this.marks, which, clampToSong(time, song.durationSec));
+    this.showLoopMarks();
+  }
+
+  /** Make the region the markers now describe the stretch that is practised. */
+  private settleLoopMarks(): void {
+    const region = markedRegion(this.marks);
+    if (!region) {
+      this.showLoopMarks();
+      return;
+    }
+    this.range = region;
+    this.sectionId = loopSectionId(region);
+    this.setLoop(true);
+    this.rebuild(); // which starts the run at the top of the region — where you want to be
+  }
+
+  /** Throw the marked region away and go back to practising the whole song. */
+  private clearLoopMarks(): void {
+    if (!this.baseSong) return;
+    this.marks = NO_MARKS;
+    this.dropRange(this.conductor.time);
+  }
+
+  /** Practise the whole song again, leaving the track where it is sitting. */
+  private dropRange(at: number): void {
+    if (this.range) {
+      this.range = null;
+      this.sectionId = "full";
+      this.rebuild();
+      this.session.seek(at);
+    }
+    this.showLoopMarks();
+  }
+
+  /** Set loop mode and put the checkbox in step with it. */
+  private setLoop(loop: boolean): void {
+    this.loop = loop;
+    (this.el.loop as HTMLInputElement).checked = loop;
+  }
+
+  /**
+   * Put the state of the two markers on their buttons.
+   *
+   * A placed point shows its own time, so the pair of them read as the region itself and
+   * not as two buttons that may or may not have been pressed — and so a marker scrolled
+   * off the top of the stage is still somewhere you can see.
+   */
+  private showLoopMarks(): void {
+    const ready = this.baseSong !== null;
+    // A placed point keeps its word as well as gaining its time — "Start 0:04" rather than
+    // "0:04" — so the pair still says what it is from across the room, and the button you
+    // are looking for is found by reading rather than by remembering which side it is on.
+    const label = (
+      button: HTMLElement,
+      time: number | null,
+      unset: string,
+      set: (value: string) => string,
+    ) => {
+      button.textContent = time === null ? unset : set(formatTime(time));
+      button.classList.toggle("set", time !== null);
+      (button as HTMLButtonElement).disabled = !ready;
+    };
+    label(this.el.markStart!, this.marks.start, "⟦ Set start", (t) => `⟦ Start ${t}`);
+    label(this.el.markEnd!, this.marks.end, "Set end ⟧", (t) => `End ${t} ⟧`);
+    (this.el.markClear as HTMLButtonElement).disabled =
+      !ready || (this.marks.start === null && this.marks.end === null);
+  }
+
+  /**
    * Wire a segmented control: click a button, it becomes the chosen one.
    *
-   * Hands, difficulty and speed are all "pick one of three", and a row of buttons showing
-   * all three answers at once beats a dropdown that shows one and hides the rest behind a
+   * Hands and difficulty are both "pick one of three", and a row of buttons showing all
+   * three answers at once beats a dropdown that shows one and hides the rest behind a
    * click — these are settings you change while looking at the stage, not ones you go
    * hunting for. `key` is the data attribute the buttons carry their value in.
    */
@@ -412,6 +731,25 @@ export class App {
       }
       onPick(picked.dataset[key]!);
     });
+  }
+
+  /**
+   * Set playback speed, as a multiple of the song's written tempo, and show it as a
+   * percentage beside the slider.
+   *
+   * A slider rather than a row of fixed steps because the useful speed is the one just
+   * inside what your hands can manage, and that lands between whatever three numbers a
+   * segmented control would have offered. It runs past 1× as well as under it: once a
+   * piece is learned, pushing it above tempo is how you find the bars that are still
+   * only *nearly* learned. Both the clock and the accompaniment have to hear about it —
+   * notes that fell at double speed over a piano still playing at one would be a
+   * different song.
+   */
+  private setRate(rate: number): void {
+    this.conductor.rate = rate;
+    this.autoPlayer.setRate(rate);
+    (this.el.speed as HTMLInputElement).value = String(Math.round(rate * 100));
+    this.el.speedValue!.textContent = `${Math.round(rate * 100)}%`;
   }
 
   /**
@@ -602,8 +940,8 @@ export class App {
       this.handModes = defaultHandModes(this.baseSong);
       (this.el.tracks as HTMLButtonElement).disabled = this.baseSong.tracks.length === 0;
       this.sections = detectSections(this.baseSong);
+      this.selectSection("full"); // a new song arrives whole, with no points marked on it
       this.populateSections();
-      this.selectSection("full");
       this.rebuild();
       void this.startPlaying();
     } catch (err) {
@@ -633,26 +971,55 @@ export class App {
     this.updatePlayButton();
   }
 
-  /** Rebuild the section dropdown from the detected sections. */
+  /**
+   * Rebuild the section dropdown: the detected sections, and the region you marked out
+   * yourself if there is one.
+   *
+   * The marked region joins the menu rather than living in a control of its own, because
+   * it answers exactly the same question a section does — *which stretch of this song am
+   * I practising?* — and two places to answer one question is how a settings row stops
+   * being readable. It appears only once both markers are down, so the menu never offers
+   * a choice that would do nothing.
+   */
   private populateSections(): void {
     const select = this.el.section as HTMLSelectElement;
     const options = [`<option value="full">Full song</option>`];
     for (const s of this.sections) {
       options.push(`<option value="${s.id}">${s.name}</option>`);
     }
+    const marked = markedRegion(this.marks);
+    if (marked && this.sectionId !== "full" && !this.sections.some((s) => s.id === this.sectionId)) {
+      options.push(
+        `<option value="${MARKED_SECTION}">⟦ ${formatTime(marked.start)}–${formatTime(marked.end)} ⟧</option>`,
+      );
+    }
     select.innerHTML = options.join("");
-    select.value = "full";
+    select.value = this.sections.some((s) => s.id === this.sectionId)
+      ? this.sectionId
+      : marked && this.sectionId !== "full"
+        ? MARKED_SECTION
+        : "full";
   }
 
-  /** Set the active practice range from a section id ("full" = whole song). */
+  /**
+   * Set the active practice range from a section id ("full" = whole song).
+   *
+   * Choosing a section drops the two loop markers on its edges. A detected section is a
+   * guess at where a phrase begins and ends, and a good one, but it is still a guess — so
+   * it arrives as something you can see on the stage and nudge with `[` and `]`, rather
+   * than as a range with no handles on it.
+   */
   private selectSection(id: string): void {
+    if (id === MARKED_SECTION) return; // already the active range; the menu is just showing it
     this.sectionId = id;
     if (id === "full" || !this.baseSong) {
       this.range = null;
+      this.marks = NO_MARKS;
       return;
     }
     const section = this.sections.find((s) => s.id === id) ?? fullSongSection(this.baseSong);
     this.range = { start: section.start, end: section.end };
+    this.marks = marksOf(this.range);
   }
 
   /** The song actually practised: the base MIDI simplified to the chosen difficulty. */
@@ -671,6 +1038,7 @@ export class App {
     const song = this.practiceSong();
     if (!song) return;
     this.renderer.setSong(song);
+    this.timeline.setSong(song);
     this.applyVisibleRange();
     this.session.configure({
       song,
@@ -683,51 +1051,57 @@ export class App {
     this.el.songName!.textContent = song.name;
     this.el.songMeta!.textContent = `${song.notes.length} notes`;
     this.updatePlayButton();
-    this.setRunRange(song);
+    this.populateSections(); // the marked region may have just appeared on it, or left it
+    this.showLoopMarks();
+    this.showRunScope(song);
   }
 
   /**
-   * Point the progress bar at whatever the run now covers.
+   * Say what the run covers, above a map that always shows the whole song.
    *
-   * Mirrors the range the session was just configured with, so the bar measures the same
-   * stretch that is actually being played: pick a section and it re-scales to that section
-   * rather than leaving you to find eight bars inside a bar for the whole piece.
+   * The clock either side of the map reads in the song's own time now, rather than in the
+   * section's: with every bar of the piece drawn between those two numbers, a pair that
+   * counted a section instead would be labelling the ends of something that is not on
+   * screen. Which stretch is being practised is said in words beside them, and drawn on
+   * the map as the part that is lit.
    */
-  private setRunRange(song: Song): void {
-    this.runRange = this.range ?? { start: 0, end: song.durationSec };
+  private showRunScope(song: Song): void {
     this.el.progress!.hidden = false;
 
-    const section = this.sections.find((s) => s.id === this.sectionId);
-    this.el.progressScope!.textContent = section ? section.name : "";
-    this.el.timeTotal!.textContent = formatTime(this.runRange.end - this.runRange.start);
-    this.shownTime = ""; // the elapsed side is re-read next frame against the new range
-    this.shownPercent = -1;
+    // Named whenever the run is less than the whole song — a detected section by its
+    // number, a hand-picked region by the times it runs between.
+    this.el.progressScope!.textContent =
+      this.sectionId === "full" ? "" : sectionLabel(this.sectionId);
+    this.el.timeTotal!.textContent = formatTime(song.durationSec);
+    this.el.timeline!.setAttribute("aria-valuemax", String(Math.round(song.durationSec)));
+    this.shownTime = ""; // the clock is re-read next frame against the new song
   }
 
   /**
-   * Draw the current position into the bar and the readout.
+   * Write the clock.
    *
-   * Called every frame, so both halves are written only when they would actually change:
-   * the text about once a second, the bar at whole percents. Wait mode holds the clock at
-   * a gate, which is the point — a bar that crept on while you were stuck on a chord would
-   * be reporting the wrong thing.
+   * Called every frame, so it is written only when it would actually change — about once
+   * a second. Wait mode holds the clock at a gate, which is the point: a readout that
+   * crept on while you were stuck on a chord would be reporting the wrong thing.
    */
   private updateProgress(nowSec: number): void {
-    const range = this.runRange;
-    if (!range) return;
+    const shown = formatTime(nowSec);
+    if (shown === this.shownTime) return;
+    this.shownTime = shown;
+    this.el.timeNow!.textContent = shown;
+    this.el.timeline!.setAttribute("aria-valuenow", String(Math.floor(nowSec)));
+    this.el.timeline!.setAttribute("aria-valuetext", shown);
+  }
 
-    const percent = Math.round(progressFraction(nowSec, range) * 100);
-    if (percent !== this.shownPercent) {
-      this.shownPercent = percent;
-      (this.el.progressFill as HTMLElement).style.width = `${percent}%`;
-      this.el.progressTrack!.setAttribute("aria-valuenow", String(percent));
-    }
-
-    const elapsed = formatTime(elapsedInRange(nowSec, range));
-    if (elapsed !== this.shownTime) {
-      this.shownTime = elapsed;
-      this.el.timeNow!.textContent = elapsed;
-    }
+  /**
+   * The region the stage should wrap its music around, if any.
+   *
+   * Only a real region being looped: looping the whole song has no seam worth drawing, and
+   * a marker being dragged suspends the wrap so the point can be aimed against the music
+   * that is genuinely either side of it rather than against a ribbon of repeats.
+   */
+  private wrapRegion(): TimeRange | null {
+    return this.loop && this.range && !this.tuningMark ? this.range : null;
   }
 
   /**
@@ -794,7 +1168,13 @@ export class App {
     this.session.update(this.conductor.time); // may gate (wait mode) or finish
     const now = this.conductor.time;
     this.autoPlayer.update(now);
-    this.renderer.render({ nowSec: now, pressed: this.pressed });
+    this.renderer.render({
+      nowSec: now,
+      pressed: this.pressed,
+      loop: this.marks,
+      wrap: this.wrapRegion(),
+    });
+    this.timeline.render({ nowSec: now, region: this.range, marks: this.marks });
     this.updateProgress(now);
 
     if (this.wasPlaying !== this.conductor.isPlaying()) this.updatePlayButton();

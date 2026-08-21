@@ -1,10 +1,16 @@
 import type { Zoom } from "../render/visibleRange.ts";
+import {
+  DEFAULT_TIMELINE_HEIGHT,
+  MAX_TIMELINE_HEIGHT,
+  MIN_TIMELINE_HEIGHT,
+} from "../render/TimelineRenderer.ts";
 
 /**
  * Settings that outlive a session.
  *
- * The keyboard zoom, the volume and mute switch, wait mode, and which MIDI device to
- * listen to — and not the rest. Difficulty, hand and section are choices about *this* song,
+ * The keyboard zoom, the timeline height, the volume and mute switch, wait mode, and which
+ * MIDI device to listen to — and not the rest. Difficulty, hand and section are choices
+ * about *this* song,
  * but "show me all 88 keys", "this loud", "don't make noise", "hold until I play the note"
  * and "the piano, not the fader box" are statements about how you like to use the app, and
  * re-making them on every launch is the whole annoyance.
@@ -15,6 +21,7 @@ const MUTED_KEY = "piana:muted";
 const VOLUME_KEY = "piana:volume";
 const WAIT_KEY = "piana:wait";
 const MIDI_DEVICE_KEY = "piana:midi-device";
+const TIMELINE_KEY = "piana:timeline-height";
 
 /** Where the slider sits before anyone has moved it: loud enough to hear, short of full. */
 export const DEFAULT_VOLUME = 0.75;
@@ -125,6 +132,38 @@ export function loadWaitMode(): boolean {
 export function saveWaitMode(wait: boolean): void {
   try {
     localStorage.setItem(WAIT_KEY, String(wait));
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
+/**
+ * How tall the song map under the stage was left, in pixels.
+ *
+ * Out-of-range values are clamped rather than discarded: a height saved on a tall screen
+ * and reopened on a short one is still a statement that you want to see plenty of the
+ * song, and the honest answer to it is "as much as fits" rather than "back to the
+ * default". Anything that is not a number at all is nobody's preference, so it takes the
+ * default instead.
+ */
+export function parseTimelineHeight(raw: string | null): number {
+  if (raw === null || raw.trim() === "") return DEFAULT_TIMELINE_HEIGHT;
+  const height = Number(raw);
+  if (!Number.isFinite(height)) return DEFAULT_TIMELINE_HEIGHT;
+  return Math.min(MAX_TIMELINE_HEIGHT, Math.max(MIN_TIMELINE_HEIGHT, Math.round(height)));
+}
+
+export function loadTimelineHeight(): number {
+  try {
+    return parseTimelineHeight(localStorage.getItem(TIMELINE_KEY));
+  } catch {
+    return DEFAULT_TIMELINE_HEIGHT;
+  }
+}
+
+export function saveTimelineHeight(height: number): void {
+  try {
+    localStorage.setItem(TIMELINE_KEY, String(Math.round(height)));
   } catch {
     /* storage unavailable — non-fatal */
   }

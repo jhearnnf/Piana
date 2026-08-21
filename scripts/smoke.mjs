@@ -127,7 +127,7 @@ check(
  */
 const countWhiteKeys = () =>
   page.evaluate(() => {
-    const canvas = document.querySelector("canvas");
+    const canvas = document.querySelector("#stage");
     const y = canvas.height - 2;
     const row = canvas.getContext("2d").getImageData(0, y, canvas.width, 1).data;
 
@@ -212,10 +212,10 @@ check("wait mode is on by default", await page.isChecked("#wait"));
 
 // The progress strip: hidden on the empty screen, and once a song is up it has to show a
 // real length rather than the 0:00 it starts life as.
-check("the progress bar appears with the song", await page.isVisible("#progress"));
+check("the timeline appears with the song", await page.isVisible("#progress"));
 const total = await page.textContent("#time-total");
 check(
-  "the progress bar knows the song's length",
+  "the timeline knows the song's length",
   /^\d+:[0-5]\d$/.test(total ?? "") && total !== "0:00",
   `total is "${total}"`,
 );
@@ -227,8 +227,8 @@ await page.uncheck("#wait");
 await page.click("#play");
 await page.waitForTimeout(1400);
 const elapsed = await page.textContent("#time-now");
-const filled = await page.evaluate(() => document.querySelector("#progress-fill").style.width);
-check("the progress bar advances as the song plays", elapsed !== "0:00", `${elapsed} / ${filled}`);
+const spoken = await page.getAttribute("#timeline", "aria-valuenow");
+check("the clock advances as the song plays", elapsed !== "0:00", `${elapsed}, aria-valuenow ${spoken}`);
 await page.check("#wait");
 await page.click("#play");
 await page.waitForTimeout(300);
@@ -237,7 +237,7 @@ await page.screenshot({ path: path.join(SHOTS, "02-playing.png") });
 check(
   "the stage is drawing, not blank",
   await page.evaluate(() => {
-    const canvas = document.querySelector("canvas");
+    const canvas = document.querySelector("#stage");
     const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
     // More than one distinct colour means something was actually painted.
     const first = pixels.slice(0, 4).join();
@@ -248,8 +248,8 @@ check(
   }),
 );
 
-// Difficulty and speed are segmented controls rather than dropdowns, and one shared
-// handler drives all three of them. The clicked button becoming the chosen one is the only
+// Difficulty and hands are segmented controls rather than dropdowns, and one shared
+// handler drives both of them. The clicked button becoming the chosen one is the only
 // visible sign it ran at all — a broken handler would just look like a button that does
 // nothing, on every one of them at once.
 await page.click('#difficulty button[data-difficulty="easy"]');
@@ -262,9 +262,22 @@ check(
 );
 await page.click('#difficulty button[data-difficulty="hard"]'); // put it back
 
-await page.click('#speed button[data-rate="0.5"]');
-check("picking a speed moves the marker onto it", (await chosen("speed", "rate", "0.5")) === "true");
-await page.click('#speed button[data-rate="1"]');
+// Speed is a slider, so the readout beside it is what says the handler ran — and the top
+// of its travel is the half worth asserting, since "up to double" is the part a stray
+// `max` would quietly take away.
+await page.fill("#speed", "200");
+check(
+  "the speed slider runs up to double",
+  (await page.textContent("#speed-value")) === "200%",
+  await page.textContent("#speed-value"),
+);
+await page.fill("#speed", "25");
+check(
+  "and down to a quarter",
+  (await page.textContent("#speed-value")) === "25%",
+  await page.textContent("#speed-value"),
+);
+await page.fill("#speed", "100");
 
 await page.click('#hand button[data-hand="right"]');
 check("picking a hand moves the marker onto it", (await chosen("hand", "hand", "right")) === "true");
@@ -287,12 +300,299 @@ await page.keyboard.up("d");
 
 await setZoom("full");
 const fullKeys = await countWhiteKeys();
-check("Full 88 shows the whole piano", fullKeys === 52, `${fullKeys} white keys, expected 52`);
+// The canvas width goes in the detail because it is what explains a wrong count: 52 keys
+// across a window caught mid-resize are too narrow to be told apart by sampling pixels.
+const stageWidth = await page.evaluate(() => document.querySelector("#stage").width);
+check(
+  "Full 88 shows the whole piano",
+  fullKeys === 52,
+  `${fullKeys} white keys, expected 52, across ${stageWidth}px`,
+);
 
 await page.keyboard.down("a");
 await page.waitForTimeout(300);
 await page.screenshot({ path: path.join(SHOTS, "04-pressed-full88.png") });
 await page.keyboard.up("a");
+
+/**
+ * Marking out a loop region: scroll the track to a moment, drop a point on it, scroll on,
+ * drop the other.
+ *
+ * The two halves that can only be checked in a real window are the gesture — a wheel over
+ * the canvas has to move the playhead rather than the page — and the markers being drawn,
+ * which is the thing that makes the region something you can aim rather than guess at.
+ *
+ * Runs on whatever keyboard the zoom checks above left behind — the gesture and the
+ * markers are the same at any width, and the restart check further down is reading that
+ * setting.
+ */
+await page.hover("#stage");
+
+const playhead = async () => page.textContent("#time-now");
+const before = await playhead();
+await page.mouse.wheel(0, -800); // up the track is further into the song
+await page.waitForTimeout(300);
+const after = await playhead();
+check("scrolling the stage moves through the song", after !== before, `${before} -> ${after}`);
+check("scrolling stops the run rather than fighting it", /Resume|Play/.test((await page.textContent("#play")) ?? ""));
+
+// The other gesture: grab the track with the middle button and pull. Chrome answers a
+// middle click with its own scroll-anywhere cursor, which eats every event after it, so
+// this is really a check that the app got in first and called it off.
+const stage = await page.locator("#stage").boundingBox();
+const midX = stage.x + stage.width / 2;
+const midY = stage.y + stage.height / 2;
+const beforeDrag = await playhead();
+await page.mouse.move(midX, midY);
+await page.mouse.down({ button: "middle" });
+for (let step = 1; step <= 5; step++) await page.mouse.move(midX, midY - step * 30);
+await page.mouse.up({ button: "middle" });
+await page.waitForTimeout(300);
+const afterDrag = await playhead();
+check(
+  "dragging the track with the middle button moves it too",
+  afterDrag !== beforeDrag,
+  `${beforeDrag} -> ${afterDrag} (dragged up, so backwards)`,
+);
+
+await page.keyboard.press("[");
+await page.waitForTimeout(150);
+const startText = await page.textContent("#mark-start");
+check(
+  "[ drops the loop start where the track is sitting",
+  /^⟦ Start \d+:[0-5]\d$/.test(startText?.trim() ?? ""),
+  `#mark-start reads "${startText}"`,
+);
+check("one point on its own is not yet a region", (await page.inputValue("#section")) === "full");
+
+await page.mouse.wheel(0, -600); // on through the song to find the other end
+await page.waitForTimeout(300);
+await page.keyboard.press("]");
+await page.waitForTimeout(300);
+
+const endText = await page.textContent("#mark-end");
+check(
+  "] closes the region",
+  /^End \d+:[0-5]\d ⟧$/.test(endText?.trim() ?? ""),
+  `#mark-end reads "${endText}"`,
+);
+check("marking a region out by hand turns Loop on", await page.isChecked("#loop"));
+check(
+  "the region joins the section menu as the chosen one",
+  (await page.inputValue("#section")) === "marked",
+  await page.inputValue("#section"),
+);
+const scope = await page.textContent("#progress-scope");
+check("the progress strip names the region", /^Loop \d+:[0-5]\d/.test(scope ?? ""), scope ?? "");
+const regionStart = (await page.textContent("#mark-start")).replace(/\D*Start\s*/, "");
+check(
+  "the run restarts at the top of the region",
+  (await playhead()) === regionStart,
+  `clock reads ${await playhead()}, region starts ${regionStart}`,
+);
+
+// The markers themselves, counted off the canvas: the green they are drawn in appears
+// nowhere else on the stage, so any of it is the marks being drawn.
+const markPixels = await page.evaluate(() => {
+  const canvas = document.querySelector("#stage");
+  const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+  let green = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    // #6bd490, allowing for the anti-aliasing along a dashed line.
+    if (Math.abs(pixels[i] - 0x6b) < 12 && Math.abs(pixels[i + 1] - 0xd4) < 12 && Math.abs(pixels[i + 2] - 0x90) < 12) {
+      green++;
+    }
+  }
+  return green;
+});
+check("the loop markers are drawn on the stage", markPixels > 200, `${markPixels} marker pixels`);
+
+// Backed off the loop start, so the shot catches the marker up the stage with the music
+// outside the region veiled below it — which is the whole of what the region looks like.
+await page.mouse.wheel(0, 220);
+await page.waitForTimeout(300);
+await page.screenshot({ path: path.join(SHOTS, "07-loop-region.png") });
+
+/** The seconds a marker button is showing, or NaN if it has not been placed. */
+const markSeconds = async (id) => {
+  const text = (await page.textContent(id)) ?? "";
+  const clock = /(\d+):([0-5]\d)/.exec(text);
+  return clock ? Number(clock[1]) * 60 + Number(clock[2]) : Number.NaN;
+};
+
+/**
+ * Fine-tuning a point by dragging it on the stage.
+ *
+ * Restarted first so the loop start is sitting exactly on the hit line, which is where the
+ * run begins — that gives the drag a known place to take hold of the line.
+ */
+await page.click("#restart");
+await page.waitForTimeout(300);
+const beforeDrag2 = await markSeconds("#mark-start");
+const stageBox = await page.locator("#stage").boundingBox();
+// The keyboard takes the bottom of the stage; the hit line is the top of it.
+const hitLine = stageBox.y + stageBox.height * (1 - 0.24);
+await page.mouse.move(stageBox.x + stageBox.width / 2, hitLine);
+await page.mouse.down();
+for (let step = 1; step <= 5; step++) {
+  await page.mouse.move(stageBox.x + stageBox.width / 2, hitLine - step * 24);
+}
+await page.mouse.up();
+await page.waitForTimeout(300);
+const afterDrag2 = await markSeconds("#mark-start");
+check(
+  "a loop point can be dragged along the stage to fine-tune it",
+  Number.isFinite(afterDrag2) && afterDrag2 > beforeDrag2,
+  `loop start moved ${beforeDrag2}s -> ${afterDrag2}s by dragging it up the stage`,
+);
+
+await page.click("#mark-clear");
+await page.waitForTimeout(200);
+
+/**
+ * Where the end point lands when it is dropped without scrolling first.
+ *
+ * The start goes on the hit line and the end on the top edge of the stage, so the two of
+ * them dropped one after the other enclose exactly the music on screen — a look-ahead's
+ * worth of it.
+ */
+await page.keyboard.press("[");
+await page.keyboard.press("]");
+await page.waitForTimeout(300);
+const enclosed = (await markSeconds("#mark-end")) - (await markSeconds("#mark-start"));
+check(
+  "the end point lands at the top of the stage, not on the hit line",
+  enclosed >= 2 && enclosed <= 4,
+  `${enclosed}s enclosed, which is the stage's own look-ahead`,
+);
+await page.screenshot({ path: path.join(SHOTS, "08-loop-wrapped.png") });
+
+/**
+ * The loop drawn as a loop: with the end of the region halfway down the stage, the music
+ * above it is the region's own opening bars, shifted up by a lap.
+ *
+ * Checked by counting note-bright pixels in the top of the stage — the wrapped notes are
+ * lit, and with Loop off the same strip is behind the veil over everything past the end
+ * point, which is far darker than any note.
+ */
+const litAbove = () =>
+  page.evaluate(() => {
+    const canvas = document.querySelector("#stage");
+    const height = Math.floor(canvas.height * 0.3);
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, height).data;
+    let lit = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+      if ((r > 200 && g > 120 && b < 140) || (r < 140 && g > 150 && b > 200)) lit++;
+    }
+    return lit;
+  });
+
+// Halfway through the region, so its end sits in the middle of the stage.
+const songSeconds = await markSeconds("#time-total");
+const midRegion = ((await markSeconds("#mark-start")) + (await markSeconds("#mark-end"))) / 2;
+const mapAt = async (seconds) => {
+  const box = await page.locator("#timeline").boundingBox();
+  await page.mouse.click(box.x + (box.width * seconds) / songSeconds, box.y + box.height / 2);
+  await page.waitForTimeout(300);
+};
+await mapAt(midRegion);
+const wrapped = await litAbove();
+
+await page.uncheck("#loop");
+await mapAt(midRegion);
+const notWrapped = await litAbove();
+check(
+  "looping shows the start of the loop above its end point",
+  wrapped > notWrapped * 2 && wrapped > 200,
+  `${wrapped} lit pixels above the end point while looping, ${notWrapped} with Loop off`,
+);
+await page.check("#loop");
+await mapAt(midRegion);
+await page.screenshot({ path: path.join(SHOTS, "09-loop-seam.png") });
+
+await page.click("#mark-clear");
+await page.waitForTimeout(200);
+check(
+  "clearing the region goes back to the whole song",
+  (await page.inputValue("#section")) === "full"
+    && (await page.textContent("#progress-scope")) === ""
+    && (await page.isDisabled("#mark-clear")),
+);
+
+/**
+ * The song map: the whole piece drawn small, clickable, and as tall as you want it.
+ *
+ * Three things can only be checked in a real window — that the notes are actually drawn on
+ * it, that a click on a point of it lands on the moment that point stands for, and that
+ * dragging its foot resizes it and the size outlives the app.
+ */
+const mapBox = await page.locator("#timeline").boundingBox();
+const mapInk = await page.evaluate(() => {
+  const canvas = document.querySelector("#timeline");
+  const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+  let notes = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    // The two hand colours, #ff9f6b and #5ac8fa, appear nowhere else on the map.
+    const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+    if (r > 200 && g > 120 && b < 140) notes++;
+    else if (r < 140 && g > 150 && b > 200) notes++;
+  }
+  return notes;
+});
+check("the song's notes are drawn on the map", mapInk > 100, `${mapInk} note pixels`);
+
+// Three quarters of the way along a 23-second song is around 0:17. Checked as a range,
+// since the exact second depends on the window width the map is drawn across.
+await page.mouse.click(mapBox.x + mapBox.width * 0.75, mapBox.y + mapBox.height / 2);
+await page.waitForTimeout(300);
+const jumped = await page.textContent("#time-now");
+const jumpedSec = Number(jumped.split(":")[0]) * 60 + Number(jumped.split(":")[1]);
+check(
+  "clicking the map jumps to that moment in the song",
+  jumpedSec >= 15 && jumpedSec <= 19,
+  `clicked three quarters along a ${await page.textContent("#time-total")} song, landed on ${jumped}`,
+);
+
+const heightOf = () => page.evaluate(() => document.querySelector("#timeline").getBoundingClientRect().height);
+const startHeight = await heightOf();
+const grip = await page.locator("#timeline-grip").boundingBox();
+await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+await page.mouse.down();
+for (let step = 1; step <= 4; step++) await page.mouse.move(grip.x + grip.width / 2, grip.y + step * 15);
+await page.mouse.up();
+await page.waitForTimeout(300);
+const grownHeight = await heightOf();
+check(
+  "dragging the grip makes the map taller",
+  grownHeight > startHeight + 30,
+  `${startHeight}px -> ${grownHeight}px`,
+);
+const MAP_HEIGHT = grownHeight;
+check(
+  "the map is still drawn at its new height",
+  await page.evaluate(() => {
+    const canvas = document.querySelector("#timeline");
+    return canvas.height >= canvas.getBoundingClientRect().height;
+  }),
+);
+
+// A section detected from the rests arrives as two markers too. The point is that the
+// app's guess at where a phrase begins is something you can then nudge with [ and ],
+// rather than something you either take whole or leave.
+const sectionIds = await page.$$eval("#section option", (opts) => opts.map((o) => o.value));
+await page.selectOption("#section", sectionIds[1]);
+await page.waitForTimeout(250);
+check(
+  "choosing a section puts its edges under the markers",
+  (await page.locator("#mark-start.set").count()) === 1
+    && (await page.locator("#mark-end.set").count()) === 1,
+  `${sectionIds.length - 1} sections; markers read ${await page.textContent("#mark-start")} .. ${await page.textContent("#mark-end")}`,
+);
+await page.selectOption("#section", "full");
+await page.waitForTimeout(200);
+
+await page.uncheck("#loop");
 
 // The per-track hand controls, and the auto split behind them. The demo is a two-track
 // file, so it opens trusting the tracks; switching both to Auto split makes the algorithm
@@ -349,6 +649,17 @@ check("mute survives a restart", stillMuted === "true", `aria-pressed="${stillMu
 
 const rememberedVolume = await reopened.inputValue("#volume");
 check("the volume survives a restart", rememberedVolume === "40", `#volume is "${rememberedVolume}"`);
+
+// Read off the style rather than measured: the timeline is hidden until a song is open,
+// and a hidden element measures zero however tall it has been told to be.
+const rememberedHeight = await reopened.evaluate(
+  () => document.querySelector("#timeline").style.height,
+);
+check(
+  "the height of the song map survives a restart",
+  Math.abs(Number.parseFloat(rememberedHeight) - MAP_HEIGHT) < 2,
+  `${rememberedHeight}, was ${MAP_HEIGHT}px`,
+);
 
 await second.close();
 

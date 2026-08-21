@@ -28,6 +28,9 @@ export class PointerInput implements InputSource {
   }
 
   private onDown = (e: PointerEvent): void => {
+    // Left button only. The middle one is how the track is scrolled, and a key that
+    // sounded under a drag meant to move the music would be a note you did not play.
+    if (e.button !== 0) return;
     const rect = this.canvas.getBoundingClientRect();
     const midi = this.renderer.keyAtPoint(e.clientX - rect.left, e.clientY - rect.top);
     if (midi === null) return;

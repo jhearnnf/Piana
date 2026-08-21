@@ -1,4 +1,6 @@
 import type { Song } from "../core/types.ts";
+import type { TimeRange } from "../game/practice.ts";
+import { loopOffsets, type LoopMarks } from "../song/loopRegion.ts";
 import { BLACK_KEY_HEIGHT_RATIO, computeKeyboard, type KeyRect } from "./keyboardLayout.ts";
 import { nextRepeatStarts, noteBarTop } from "./noteBars.ts";
 
@@ -27,9 +29,22 @@ export interface RendererTheme {
   pressed: string;
   /** Outline of a held key, dark enough to read against `pressed`. */
   pressedEdge: string;
+  /** The loop markers, and the tabs naming them. */
+  loopMark: string;
+  /** Ink of a marker's tab, read against `loopMark`. */
+  loopMarkInk: string;
+  /** Veil drawn over the music outside the marked region. */
+  loopVeil: string;
 }
 
-const DEFAULT_THEME: RendererTheme = {
+/**
+ * The stage's colours, shared with the timeline below it.
+ *
+ * Exported so the map of the whole song is drawn in the same left and right hands, and
+ * marks its loop points in the same green, as the notes falling above it. Two surfaces
+ * describing one song should not be able to disagree about what colour that song is.
+ */
+export const STAGE_THEME: RendererTheme = {
   background: "#14161c",
   whiteKey: "#fbfcff",
   whiteKeyBack: "#d9dde8",
@@ -45,6 +60,9 @@ const DEFAULT_THEME: RendererTheme = {
   rightHand: "#5ac8fa",
   pressed: "#ffc247",
   pressedEdge: "#8a5300",
+  loopMark: "#6bd490",
+  loopMarkInk: "#0b2417",
+  loopVeil: "rgba(8, 9, 13, 0.62)",
 };
 
 /**
@@ -89,6 +107,12 @@ const REPEAT_GAP = 14;
 
 /** Shortest a bar may be drawn, so trimming a tail can never erase the note. */
 const MIN_NOTE_HEIGHT = 5;
+
+/** How far either side of a loop marker counts as grabbing it, in pixels. */
+const MARK_GRAB_PX = 8;
+
+/** How long a note is kept on screen after it has been struck, in seconds. */
+const TAIL_SEC = 0.5;
 
 /** How far the light above a held key reaches, in pixels and as a share of the fall area. */
 const GLOW_MAX_HEIGHT = 130;
@@ -142,6 +166,16 @@ export interface RenderState {
   nowSec: number;
   /** MIDI numbers currently held down by the player (for key highlight). */
   pressed: ReadonlySet<number>;
+  /** The loop points marked so far. Either end may still be unset. */
+  loop?: LoopMarks | null;
+  /**
+   * The region being looped, when Loop is on.
+   *
+   * Given, the stage shows nothing but this region's music, wrapped: its opening bars
+   * fall directly above its closing ones, lap after lap, so the repeat arrives instead of
+   * interrupting.
+   */
+  wrap?: TimeRange | null;
 }
 
 /**
@@ -183,7 +217,7 @@ export class PianoRenderer {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2D canvas context unavailable");
     this.ctx = ctx;
-    this.theme = { ...DEFAULT_THEME, ...theme };
+    this.theme = { ...STAGE_THEME, ...theme };
     const hand = (colour: string) => ({
       white: colour,
       black: shade(colour, BLACK_NOTE_SHADE),
@@ -245,7 +279,9 @@ export class PianoRenderer {
     ctx.fillStyle = this.theme.background;
     ctx.fillRect(0, 0, this.cssWidth, this.cssHeight);
 
-    if (this.song) this.drawFallingNotes(this.song, state.nowSec);
+    const wrap = state.wrap ?? null;
+    if (this.song) this.drawFallingNotes(this.song, state.nowSec, wrap);
+    if (state.loop || wrap) this.drawLoopMarks(state.loop ?? null, wrap, state.nowSec);
     this.drawHitLine();
     // Over the hit line, under the keys: the light reads as coming up off the
     // key rather than as another thing lying on the stage.
@@ -299,24 +335,52 @@ export class PianoRenderer {
     ctx.restore();
   }
 
-  private drawFallingNotes(song: Song, nowSec: number): void {
-    const windowStart = nowSec - 0.5; // keep notes briefly after they're struck
+  /**
+   * The falling notes, once through the song — or, while a region is looping, that region
+   * over and over.
+   *
+   * Wrapped, the rest of the piece is not drawn at all: the notes on either side of the
+   * loop are not ones you are going to play, and leaving them there behind the repeats
+   * would be two songs falling down the same screen.
+   */
+  private drawFallingNotes(song: Song, nowSec: number, wrap: TimeRange | null): void {
+    const windowStart = nowSec - TAIL_SEC;
     const windowEnd = nowSec + this.lookAheadSec;
 
+    if (!wrap) {
+      this.drawNotePass(song, nowSec, windowStart, windowEnd, 0, null);
+      return;
+    }
+    for (const offset of loopOffsets(wrap, windowStart, windowEnd)) {
+      this.drawNotePass(song, nowSec, windowStart, windowEnd, offset, wrap);
+    }
+  }
+
+  /** One pass over the song, with every note shifted later by `offset` seconds. */
+  private drawNotePass(
+    song: Song,
+    nowSec: number,
+    windowStart: number,
+    windowEnd: number,
+    offset: number,
+    wrap: TimeRange | null,
+  ): void {
     for (let i = 0; i < song.notes.length; i++) {
       const note = song.notes[i]!;
-      if (note.time > windowEnd || note.time + note.duration < windowStart) continue;
+      if (wrap && (note.time < wrap.start || note.time >= wrap.end)) continue;
+      const time = note.time + offset;
+      if (time > windowEnd || time + note.duration < windowStart) continue;
       const key = this.keyByMidi.get(note.midi);
       if (!key) continue; // outside the visible range (zoomed out)
 
       // The head — the edge that meets the hit line — is the note's start, so a bar falls
       // head-down and its tail is the part that has already been played.
-      const yHead = this.timeToY(note.time, nowSec);
-      const yEnd = this.timeToY(note.time + note.duration, nowSec);
+      const yHead = this.timeToY(time, nowSec);
+      const yEnd = this.timeToY(time + note.duration, nowSec);
 
       const repeatStart = this.repeatStarts[i] ?? Infinity;
       const yRepeat = Number.isFinite(repeatStart)
-        ? this.timeToY(repeatStart, nowSec)
+        ? this.timeToY(repeatStart + offset, nowSec)
         : -Infinity; // never repeated: infinitely far up the screen
       const yTop = noteBarTop(yEnd, yHead, yRepeat, REPEAT_GAP, MIN_NOTE_HEIGHT);
       const height = Math.max(MIN_NOTE_HEIGHT, yHead - yTop);
@@ -385,6 +449,165 @@ export class PianoRenderer {
       Math.max(0, radius - lineWidth / 2),
     );
     ctx.stroke();
+  }
+
+  /**
+   * The loop points, and a veil over everything outside them.
+   *
+   * The veil is the part that does the work. Two lines on a dark stage are two lines you
+   * have to find and then work out which side of; dimming the music that will not be
+   * played says the same thing in the shape you already read the stage in — what is lit
+   * is what you are practising.
+   */
+  private drawLoopMarks(marks: LoopMarks | null, wrap: TimeRange | null, nowSec: number): void {
+    if (wrap) {
+      this.drawLapLines(wrap, nowSec);
+      return;
+    }
+    if (!marks) return;
+
+    const { ctx } = this;
+    const top = this.keyboardTop;
+    const { start, end } = marks;
+
+    ctx.fillStyle = this.theme.loopVeil;
+    // Earlier than the start means lower down the stage, so the start's veil hangs below
+    // its line, all the way to the keys.
+    if (start !== null) {
+      const y = Math.max(0, this.timeToY(start, nowSec));
+      if (y < top) ctx.fillRect(0, y, this.cssWidth, top - y);
+    }
+    if (end !== null) {
+      const y = Math.min(top, this.timeToY(end, nowSec));
+      if (y > 0) ctx.fillRect(0, 0, this.cssWidth, y);
+    }
+
+    if (start !== null) this.drawLoopMark(this.timeToY(start, nowSec), "LOOP START", -1);
+    if (end !== null) this.drawLoopMark(this.timeToY(end, nowSec), "LOOP END", 1);
+  }
+
+  /**
+   * The seams of a looping region: a line wherever one lap ends and the next begins.
+   *
+   * No veil here, because with the region wrapped there is nothing on the stage that is
+   * not the loop. Only the two seams of the lap you are playing are named — the ones
+   * further up and down the ribbon are the same two boundaries coming round again, and
+   * repeating their labels would say nothing except that the loop is short.
+   */
+  private drawLapLines(wrap: TimeRange, nowSec: number): void {
+    const windowStart = nowSec - TAIL_SEC;
+    const windowEnd = nowSec + this.lookAheadSec;
+
+    for (const offset of loopOffsets(wrap, windowStart, windowEnd)) {
+      // Each lap opens on the region's start and closes on its end; drawn from the region
+      // rather than from the marks so a seam and the music either side of it cannot drift
+      // apart by a frame.
+      const named = offset === 0;
+      this.drawLoopMark(this.timeToY(wrap.start + offset, nowSec), named ? "LOOP START" : null, -1);
+      this.drawLoopMark(this.timeToY(wrap.end + offset, nowSec), named ? "LOOP END" : null, 1);
+    }
+  }
+
+  /**
+   * One loop marker: a dashed rule across the stage with a tab naming it.
+   *
+   * Dashed, because a solid line the width of the stage is what the hit line is, and the
+   * two say very different things. The tab sits on the side the region is on — `inside`
+   * is -1 for up the screen, 1 for down — so the pair of them frame the passage rather
+   * than pointing away from it. A `null` label draws the line alone, for the seams of a
+   * lap other than the one being played.
+   */
+  private drawLoopMark(y: number, label: string | null, inside: number): void {
+    const { ctx } = this;
+    const top = this.keyboardTop;
+    if (y < 0 || y > top) return; // scrolled off the stage
+
+    ctx.save();
+    ctx.strokeStyle = this.theme.loopMark;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(this.cssWidth, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (label === null) {
+      ctx.restore();
+      return;
+    }
+
+    ctx.font = "700 10px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const width = ctx.measureText(label).width + 16;
+    const height = 17;
+    const x = Math.max(6, this.cssWidth - width - 12);
+    // Clamped onto the stage so a marker sitting at either edge still says which it is,
+    // instead of hanging its own name off the top of the screen.
+    const tabY = Math.min(top - height - 2, Math.max(2, inside > 0 ? y + 3 : y - height - 3));
+
+    ctx.fillStyle = this.theme.loopMark;
+    this.roundRect(x, tabY, width, height, 4);
+    ctx.fill();
+    ctx.fillStyle = this.theme.loopMarkInk;
+    ctx.fillText(label, x + width / 2, tabY + height / 2 + 0.5);
+    ctx.restore();
+  }
+
+  /**
+   * The song time showing at the very top of the stage.
+   *
+   * Where the loop *end* is dropped. The start goes on the hit line, because that is the
+   * moment a passage begins — but a passage ends at the far side of the music you can see
+   * coming, and aiming its end at the top edge means a region shorter than the look-ahead
+   * is framed on the screen whole, both markers visible at once.
+   */
+  timeAtTop(nowSec: number): number {
+    return nowSec + this.lookAheadSec;
+  }
+
+  /** The song time a y pixel on the stage stands for — {@link timeToY} read backwards. */
+  timeAtY(y: number, nowSec: number): number {
+    const fallHeight = this.keyboardTop;
+    if (!(fallHeight > 0)) return nowSec;
+    return nowSec + (1 - y / fallHeight) * this.lookAheadSec;
+  }
+
+  /**
+   * Which loop marker a height on the stage is grabbing, or null if neither.
+   *
+   * Only the height is asked for, because a marker is a line right across the stage — it
+   * can be taken hold of anywhere along it. A line two pixels thick is not something
+   * anyone can put a mouse on, so the reach is a fingertip's width either side, and when
+   * both markers are inside that reach the nearer one wins; otherwise a region squeezed
+   * shut would only ever let go of whichever end happened to be tested first.
+   */
+  markAtY(py: number, marks: LoopMarks, nowSec: number): "start" | "end" | null {
+    if (py < 0 || py > this.keyboardTop) return null;
+
+    let best: "start" | "end" | null = null;
+    let bestDistance = MARK_GRAB_PX;
+    for (const which of ["start", "end"] as const) {
+      const time = marks[which];
+      if (time === null) continue;
+      const distance = Math.abs(this.timeToY(time, nowSec) - py);
+      if (distance <= bestDistance) {
+        best = which;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * How much song time one pixel of the fall area is worth.
+   *
+   * The scale the falling notes are drawn at, handed out so a gesture that scrolls the
+   * track can move the music by exactly as far as it looks like it should.
+   */
+  secondsPerPixel(): number {
+    return this.keyboardTop > 0 ? this.lookAheadSec / this.keyboardTop : 0;
   }
 
   private drawHitLine(): void {
