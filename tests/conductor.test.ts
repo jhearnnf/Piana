@@ -55,6 +55,41 @@ describe("Conductor", () => {
     expect(c.time).toBeCloseTo(1.5, 5);
   });
 
+  it("says so each time it comes round", () => {
+    const c = new Conductor();
+    let laps = 0;
+    c.onLoop = () => laps++;
+    c.setLoop({ start: 0, end: 1 });
+    c.play();
+    c.tick(0);
+    c.tick(1500); // one wrap
+    expect(laps).toBe(1);
+    c.tick(3000); // and another
+    expect(laps).toBe(2);
+  });
+
+  it("has already moved the clock by the time it says so", () => {
+    const c = new Conductor();
+    let atLap = -1;
+    c.onLoop = () => (atLap = c.time);
+    c.setLoop({ start: 2, end: 4 });
+    c.play();
+    c.tick(0);
+    c.tick(2500); // 2 -> 4.5, wraps to 2.5
+    expect(atLap).toBeCloseTo(2.5, 5);
+  });
+
+  it("does not announce a lap that never happened", () => {
+    const c = new Conductor();
+    let laps = 0;
+    c.onLoop = () => laps++;
+    c.duration = 2;
+    c.play();
+    c.tick(0);
+    c.tick(5000); // runs to the end of a song with no loop set
+    expect(laps).toBe(0);
+  });
+
   it("stop returns to loop start when looping", () => {
     const c = new Conductor();
     c.setLoop({ start: 4, end: 8 });

@@ -5,6 +5,7 @@ import { ScoringSession, type HitResult, type ScoreResult } from "./Scoring.ts";
 import {
   advanceGate,
   findGate,
+  firstGroupAtOrAfter,
   groupChords,
   splitPractice,
   type NoteGroup,
@@ -45,6 +46,11 @@ export class GameSession {
   private rangeStart = 0;
   private rangeEnd = 0;
   private state: SessionState = "idle";
+  /**
+   * Where the clock was at the previous `update`, so the end of the range can be judged by
+   * arriving at it rather than by sitting past it. See {@link reachedEnd}.
+   */
+  private lastUpdateSec = 0;
 
   /** Fired once when a scored run reaches the end of its range. */
   onFinish?: (result: ScoreResult) => void;
@@ -52,7 +58,9 @@ export class GameSession {
   constructor(
     private readonly conductor: Conductor,
     private readonly autoPlayer: AutoPlayer,
-  ) {}
+  ) {
+    this.conductor.onLoop = () => this.startLap();
+  }
 
   getState(): SessionState {
     return this.state;
@@ -82,11 +90,51 @@ export class GameSession {
   reset(): void {
     this.conductor.pause();
     this.conductor.seek(this.rangeStart);
-    this.autoPlayer.seekTo(this.rangeStart);
-    this.gateIndex = 0;
-    this.gateSatisfied.clear();
+    this.aimAt(this.rangeStart);
     this.scoring = new ScoringSession(this.required);
     this.state = "idle";
+  }
+
+  /**
+   * Move the run to `seconds`, taking everything that follows the clock along with it.
+   *
+   * This is what scrolling the track calls. The gate has to move too: left where it was,
+   * wait mode would spend every frame hauling the clock back to a chord you have just
+   * scrolled past, and the music would refuse to move at all.
+   *
+   * The score is left alone. Scrolling is how you go and look at a passage, not a second
+   * attempt at the one you were playing — and a run you have scrolled through is finished
+   * from the results screen either way.
+   */
+  seek(seconds: number): void {
+    this.conductor.seek(seconds);
+    this.aimAt(this.conductor.time);
+  }
+
+  /**
+   * Begin a fresh lap of a looping run.
+   *
+   * A loop is the same passage played again, so everything judging it starts again too:
+   * the wait-mode gate goes back to the first chord of the range, the accompaniment
+   * re-aims, and the score is taken from scratch rather than carrying the first lap's
+   * misses round with it for ever. Without this the gate stayed parked past the last
+   * chord of lap one and every lap after it played itself through, waiting for nothing.
+   *
+   * Aimed at the range's own start rather than at the clock, which the transport wraps a
+   * fraction beyond it: a chord written exactly on the loop point is part of the lap, and
+   * would otherwise be stepped over by the very carry that keeps the loop from drifting.
+   */
+  private startLap(): void {
+    this.aimAt(this.rangeStart);
+    this.scoring = new ScoringSession(this.required);
+  }
+
+  /** Point the gate, the accompaniment and the end-of-run test at `seconds`. */
+  private aimAt(seconds: number): void {
+    this.autoPlayer.seekTo(seconds);
+    this.gateIndex = firstGroupAtOrAfter(this.groups, seconds);
+    this.gateSatisfied.clear();
+    this.lastUpdateSec = seconds;
   }
 
   start(): void {
@@ -141,7 +189,21 @@ export class GameSession {
     }
 
     // Looping practice never ends; a scored run finishes at the end of its range.
-    if (!this.config?.loop && this.conductor.time >= this.rangeEnd) this.finish();
+    if (!this.config?.loop && this.reachedEnd()) this.finish();
+    this.lastUpdateSec = this.conductor.time;
+  }
+
+  /**
+   * True once the clock has *arrived* at the end of the range, rather than merely sitting
+   * past it.
+   *
+   * Scrolling the track puts the clock wherever the hand goes, and a run that ended the
+   * instant you scrolled past the last bar would answer a scroll with a score card. A
+   * range with nothing in it is over the moment it begins.
+   */
+  private reachedEnd(): boolean {
+    if (this.rangeEnd <= this.rangeStart) return true;
+    return this.conductor.time >= this.rangeEnd && this.lastUpdateSec < this.rangeEnd;
   }
 
   private finish(): void {

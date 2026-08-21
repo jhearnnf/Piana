@@ -21,6 +21,16 @@ export class Conductor {
   /** Total song length in seconds; playback pauses on reaching it (when not looping). */
   duration = 0;
 
+  /**
+   * Fired the instant playback wraps from the end of a loop back to its start.
+   *
+   * The transport is the only thing that knows a lap has ended: it happens inside the
+   * clock's own arithmetic, and by the time anything else looked at the time it would see
+   * a position near the start with no way to tell a fresh lap from a seek. A lap is the
+   * same passage played again, so whatever is judging it has to be told to start again.
+   */
+  onLoop?: () => void;
+
   get time(): number {
     return this.timeSec;
   }
@@ -84,7 +94,11 @@ export class Conductor {
       const len = this.loop.end - this.loop.start;
       if (len > 0 && t >= this.loop.end) {
         // Wrap with carry so we don't drift on each loop.
-        t = this.loop.start + ((t - this.loop.start) % len);
+        this.timeSec = Math.max(0, this.loop.start + ((t - this.loop.start) % len));
+        // Announced after the clock has moved, so a listener that seeks or rebuilds is
+        // working from the new lap's own time rather than from the one it replaced.
+        this.onLoop?.();
+        return;
       }
     } else if (this.duration > 0 && t >= this.duration) {
       t = this.duration;

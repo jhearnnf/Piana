@@ -69,6 +69,25 @@ export function groupChords(notes: readonly Note[], toleranceSec = 0.03): NoteGr
 }
 
 /**
+ * Index of the first chord group starting at or after `time` (binary search).
+ *
+ * Where the wait-mode gate belongs once the clock has been moved by something other than
+ * playing — a loop coming round again, or the player scrolling the track to pick out a
+ * passage. Everything before `time` has gone by; the next thing to wait for is the first
+ * group that has not.
+ */
+export function firstGroupAtOrAfter(groups: readonly NoteGroup[], time: number): number {
+  let lo = 0;
+  let hi = groups.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (groups[mid]!.time < time) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
  * How far past the current gate a press may still reach, in seconds.
  *
  * Notes written a few milliseconds apart become separate gates, but two keys struck
