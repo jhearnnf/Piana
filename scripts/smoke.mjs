@@ -210,6 +210,67 @@ const playLabel = await page.textContent("#play");
 check("a loaded song starts playing by itself", /Pause/.test(playLabel ?? ""), playLabel ?? "");
 check("wait mode is on by default", await page.isChecked("#wait"));
 
+/**
+ * The space bar, which is the transport and nothing else.
+ *
+ * A browser hands the bar to whatever has the focus - it presses the button, ticks the tick
+ * box, opens the dropdown. None of that can be checked anywhere but in a real window, and
+ * all of it is the failure this exists for: reaching for the bar to stop the music and
+ * having it re-tick Loop instead, because Loop is what you last clicked.
+ */
+const playReads = () => page.textContent("#play");
+
+await page.focus("#loop");
+const loopBefore = await page.isChecked("#loop");
+await page.keyboard.press("Space");
+await page.waitForTimeout(250);
+check(
+  "the space bar pauses with a tick box focused, and leaves the box alone",
+  /Resume/.test(await playReads()) && (await page.isChecked("#loop")) === loopBefore,
+  `#play reads "${await playReads()}", #loop still ${await page.isChecked("#loop")}`,
+);
+
+await page.keyboard.press("Space");
+await page.waitForTimeout(250);
+check(
+  "and plays again on the next press, still not touching the box",
+  /Pause/.test(await playReads()) && (await page.isChecked("#loop")) === loopBefore,
+  `#play reads "${await playReads()}"`,
+);
+
+// With Play itself focused the bar must toggle once, not twice - once from the app, and
+// once more from the browser pressing the button under the focus ring.
+await page.focus("#play");
+await page.keyboard.press("Space");
+await page.waitForTimeout(250);
+check(
+  "the space bar toggles once, not twice, with Play focused",
+  /Resume/.test(await playReads()),
+  `#play reads "${await playReads()}"`,
+);
+
+// A dropdown is the browser's other habit with the bar.
+await page.focus("#section");
+const sectionBefore = await page.inputValue("#section");
+await page.keyboard.press("Space");
+await page.waitForTimeout(250);
+check(
+  "the space bar plays rather than opening a focused dropdown",
+  /Pause/.test(await playReads()) && (await page.inputValue("#section")) === sectionBefore,
+  `#play reads "${await playReads()}", #section still "${await page.inputValue("#section")}"`,
+);
+
+// Which leaves the tick boxes needing another key, since a checkbox answers only the bar.
+await page.focus("#loop");
+await page.keyboard.press("Enter");
+await page.waitForTimeout(150);
+check(
+  "Enter toggles a tick box, which the space bar no longer can",
+  (await page.isChecked("#loop")) !== loopBefore,
+);
+await page.keyboard.press("Enter"); // put it back the way the run found it
+await page.waitForTimeout(150);
+
 // The progress strip: hidden on the empty screen, and once a song is up it has to show a
 // real length rather than the 0:00 it starts life as.
 check("the timeline appears with the song", await page.isVisible("#progress"));
@@ -430,19 +491,27 @@ await page.click("#restart");
 await page.waitForTimeout(300);
 const beforeDrag2 = await markSeconds("#mark-start");
 const stageBox = await page.locator("#stage").boundingBox();
-// The keyboard takes the bottom of the stage; the hit line is the top of it.
-const hitLine = stageBox.y + stageBox.height * (1 - 0.24);
+// The keyboard takes the bottom of the stage; the hit line is the top of it. Taken hold of
+// a few pixels *above* that line rather than on it: a marker cannot be grabbed from over
+// the keys, so aiming at the line itself means balancing on its last pixel, and a header
+// one pixel taller anywhere above the stage would tip the grab into the keyboard and this
+// check would fail for a reason that has nothing to do with dragging markers.
+const hitLine = stageBox.y + stageBox.height * (1 - 0.24) - 4;
 await page.mouse.move(stageBox.x + stageBox.width / 2, hitLine);
 await page.mouse.down();
-for (let step = 1; step <= 5; step++) {
-  await page.mouse.move(stageBox.x + stageBox.width / 2, hitLine - step * 24);
+// Far enough up the stage to be worth more than a second of song whatever height the
+// window happens to give the notes. The buttons read in whole seconds, so a drag worth
+// nine tenths of one is a drag this cannot see — and the app growing a pixel anywhere
+// above the stage was enough to push it under.
+for (let step = 1; step <= 8; step++) {
+  await page.mouse.move(stageBox.x + stageBox.width / 2, hitLine - step * 30);
 }
 await page.mouse.up();
 await page.waitForTimeout(300);
 const afterDrag2 = await markSeconds("#mark-start");
 check(
   "a loop point can be dragged along the stage to fine-tune it",
-  Number.isFinite(afterDrag2) && afterDrag2 > beforeDrag2,
+  Number.isFinite(afterDrag2) && afterDrag2 >= beforeDrag2 + 1,
   `loop start moved ${beforeDrag2}s -> ${afterDrag2}s by dragging it up the stage`,
 );
 
@@ -589,6 +658,108 @@ check(
     && (await page.locator("#mark-end.set").count()) === 1,
   `${sectionIds.length - 1} sections; markers read ${await page.textContent("#mark-start")} .. ${await page.textContent("#mark-end")}`,
 );
+
+/**
+ * Keeping a loop, finding it again, and throwing it away.
+ *
+ * The marked region above is a stretch of song; this is the same stretch given a name and
+ * kept. Everything about it is real-window work — the lane is drawn on a canvas, the band
+ * is hovered and clicked at a pixel, and the name that says which loop you are on is
+ * painted over the stage — so none of it can be checked anywhere but here.
+ */
+check("a marked region can be kept", await page.isEnabled("#loop-save"));
+await page.click("#loop-save");
+await page.waitForTimeout(150);
+const offered = await page.inputValue("#loop-name");
+check("the name box opens with a name already in it", offered === "Loop 1", `offered "${offered}"`);
+
+await page.fill("#loop-name", "Chorus");
+await page.press("#loop-name", "Enter");
+await page.waitForTimeout(300);
+
+check(
+  "keeping a loop names it over the stage",
+  (await page.isVisible("#stage-loop"))
+    && (await page.textContent(".stage-loop-name")) === "Chorus",
+);
+
+const withLane = await heightOf();
+check(
+  "the lane of saved loops is added to the map rather than taken out of it",
+  withLane > MAP_HEIGHT,
+  `${MAP_HEIGHT}px -> ${withLane}px`,
+);
+
+/**
+ * Violet, #c08bff — the colour of a kept loop, which nothing else on the map wears.
+ *
+ * Counted by the shape of the colour rather than by its exact value, because a band is
+ * drawn at three different strengths: full for the loop being played, held back for one
+ * merely saved, and between the two under the pointer. What survives all three is blue
+ * over red over green, which no other ink on the map does — the notes and the playhead are
+ * greener than they are red, and the background is barely any colour at all.
+ */
+const loopInk = () =>
+  page.evaluate(() => {
+    const canvas = document.querySelector("#timeline");
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let violet = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]];
+      if (b > 100 && b > r && r > g && b - g > 40) violet++;
+    }
+    return violet;
+  });
+const bandInk = await loopInk();
+check("the saved loop is drawn on the map", bandInk > 20, `${bandInk} violet pixels`);
+
+// Cleared, so what follows is genuinely finding the loop again rather than looking at one
+// that never went away.
+await page.keyboard.press("\\");
+await page.waitForTimeout(250);
+check(
+  "clearing the region puts the loop away without forgetting it",
+  (await page.isHidden("#stage-loop")) && (await loopInk()) > 20,
+);
+
+// Hunted along the lane rather than computed: the band's position is the thing under test,
+// so working it out here from the same numbers the app used would prove nothing.
+const laneBox = await page.locator("#timeline").boundingBox();
+let overBand = null;
+for (let step = 1; step < 40 && overBand === null; step++) {
+  const x = laneBox.x + (laneBox.width * step) / 40;
+  await page.mouse.move(x, laneBox.y + 6);
+  await page.waitForTimeout(40);
+  if (await page.isVisible("#loop-tip")) overBand = x;
+}
+check(
+  "pointing at a saved loop says what it is called",
+  overBand !== null && (await page.textContent(".loop-tip-name")) === "Chorus",
+  overBand === null ? "no band found along the lane" : `named at x=${Math.round(overBand)}`,
+);
+await page.screenshot({ path: path.join(SHOTS, "10-loop-hover.png") });
+
+if (overBand !== null) {
+  await page.mouse.click(overBand, laneBox.y + 6);
+  await page.waitForTimeout(300);
+  check(
+    "clicking a saved loop starts that stretch",
+    (await page.isVisible("#stage-loop"))
+      && (await page.textContent(".stage-loop-name")) === "Chorus"
+      && (await page.isChecked("#loop")),
+  );
+}
+await page.screenshot({ path: path.join(SHOTS, "11-loop-playing.png") });
+
+await page.click("#loop-delete");
+await page.waitForTimeout(300);
+check(
+  "a saved loop can be forgotten, and the lane goes with it",
+  (await page.isHidden("#stage-loop"))
+    && (await loopInk()) < 5
+    && Math.abs((await heightOf()) - MAP_HEIGHT) < 2,
+);
+
 await page.selectOption("#section", "full");
 await page.waitForTimeout(200);
 

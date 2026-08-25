@@ -32,6 +32,19 @@ import {
   NO_MARKS,
   type LoopMarks,
 } from "../song/loopRegion.ts";
+import {
+  addLoop,
+  defaultLoopName,
+  loadLoops,
+  loopById,
+  loopMatching,
+  MAX_LOOP_NAME,
+  rangeOf,
+  removeLoop,
+  renameLoop,
+  saveLoops,
+  type SavedLoop,
+} from "../song/savedLoops.ts";
 import { ScrubInput } from "../input/ScrubInput.ts";
 import { clampToSong } from "../input/scrub.ts";
 import { MarkerDrag } from "../input/MarkerDrag.ts";
@@ -42,7 +55,7 @@ import {
   MIN_TIMELINE_HEIGHT,
   TimelineRenderer,
 } from "../render/TimelineRenderer.ts";
-import { formatTime, sectionLabel } from "./format.ts";
+import { escapeHtml, formatTime, sectionLabel } from "./format.ts";
 import { showResults } from "./resultsScreen.ts";
 import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
@@ -82,6 +95,33 @@ const MARKED_SECTION = "marked";
 const KEY_SEEK_STEP = 2;
 const KEY_SEEK_COARSE = 15;
 
+/** The `<input>` types that letters actually go into, as against sliders and tick boxes. */
+const TEXT_ENTRY = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
+
+/**
+ * Is this element one that letters go into?
+ *
+ * Two boxes on the app take typing — the one that names a loop and the one that searches
+ * the song list — and every keyboard shortcut has to keep out of both, since `[` and the
+ * space bar are perfectly good characters to put in a name. Asked of the element rather
+ * than of those two boxes, because the next box will want the same answer.
+ *
+ * Deliberately narrow: a slider, a tick box and a dropdown are all things the focus can
+ * land on and none of them is a place you are writing, so a shortcut pressed over one of
+ * them is a shortcut, not a keystroke.
+ */
+function isTyping(element: Element | null): boolean {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.isContentEditable) return true;
+  if (element instanceof HTMLTextAreaElement) return true;
+  return element instanceof HTMLInputElement && TEXT_ENTRY.has(element.type);
+}
+
+/** A name of the user's, in the quotes a tooltip says it in. */
+function quoted(name: string): string {
+  return `“${name}”`;
+}
+
 /**
  * The chrome above the stage, in three strips, ordered by how often you touch them.
  *
@@ -94,8 +134,11 @@ const KEY_SEEK_COARSE = 15;
  *  3. The timeline, sitting directly on the stage: the whole song drawn small, so the
  *     shape of the piece and where you are in it are one picture. Click it to go there.
  *     Its head carries the clock and the two loop points — the only controls on the screen
- *     about a moment in the song rather than about the run as a whole — and its foot is a
- *     grip for how much room the map gets.
+ *     about a moment in the song rather than about the run as a whole — plus the button
+ *     that keeps the marked stretch under a name. Along the top of the map itself runs the
+ *     lane of loops already kept for this song: point at one to see what it is called and
+ *     which bars it holds, click it to practise it. Its foot is a grip for how much room
+ *     the map gets.
  *
  * There is no title band. It was fifty pixels saying the name of an app you already
  * opened, taken off the runway the notes fall down.
@@ -103,7 +146,8 @@ const KEY_SEEK_COARSE = 15;
 const TEMPLATE = `
   <div class="piana-bar">
     <div class="bar-transport">
-      <button id="play" class="play-btn" type="button" disabled>▶ Play</button>
+      <button id="play" class="play-btn" type="button" disabled
+              title="Play or pause (space)">▶ Play</button>
       <button id="restart" class="icon-btn" type="button"
               title="Start this run again" aria-label="Restart" disabled>⟲</button>
     </div>
@@ -157,7 +201,6 @@ const TEMPLATE = `
 
     <div class="toggles">
       <label class="chip"><input type="checkbox" id="wait" checked /> Wait mode</label>
-      <label class="chip"><input type="checkbox" id="loop" /> Loop</label>
     </div>
 
     <label class="setting">
@@ -193,27 +236,47 @@ const TEMPLATE = `
     <div class="timeline-head">
       <span class="time" id="time-now">0:00</span>
       <span class="progress-scope" id="progress-scope"></span>
-      <span class="loop-marks" role="group" aria-labelledby="loop-marks-label">
-        <span class="setting-label" id="loop-marks-label">Loop</span>
+      <span class="loop-marks" role="group" aria-label="Loop">
+        <label class="loop-toggle"
+               title="Repeat the marked stretch over and over instead of playing it once">
+          <input type="checkbox" id="loop" />
+          <span class="loop-toggle-icon" aria-hidden="true">↻</span>
+          <span>Loop</span>
+        </label>
         <button id="mark-start" type="button" class="mark-btn" disabled
                 title="Start the loop at the hit line ( [ )">⟦ Set start</button>
         <button id="mark-end" type="button" class="mark-btn" disabled
                 title="End the loop at the top of the stage ( ] )">Set end ⟧</button>
         <button id="mark-clear" type="button" class="mark-btn clear" disabled
                 title="Back to the whole song ( \\ )" aria-label="Clear the loop region">✕</button>
+        <span class="mark-sep" aria-hidden="true"></span>
+        <button id="loop-save" type="button" class="mark-btn" disabled
+                title="Keep this stretch under a name">✚ Save loop</button>
+        <button id="loop-delete" type="button" class="mark-btn clear" hidden
+                title="Forget this saved loop">Forget</button>
       </span>
+      <form id="loop-name-form" class="loop-name-form" hidden>
+        <input id="loop-name" class="loop-name-input" type="text" maxlength="40"
+               autocomplete="off" spellcheck="false"
+               placeholder="Name this loop" aria-label="Loop name" />
+        <button type="submit" class="mark-btn set">Keep</button>
+        <button id="loop-name-cancel" type="button" class="mark-btn clear"
+                aria-label="Cancel">✕</button>
+      </form>
       <span class="time" id="time-total">0:00</span>
     </div>
     <div class="timeline-body">
       <canvas id="timeline" tabindex="0" role="slider" aria-label="Song position"
               aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"
               title="Click or drag to move through the song"></canvas>
+      <div class="loop-tip" id="loop-tip" hidden></div>
     </div>
     <div class="timeline-grip" id="timeline-grip"
          title="Drag to make the song map taller or shorter"></div>
   </div>
   <div class="piana-stage">
     <canvas id="stage" title="Scroll — or drag with the middle button — to move through the song"></canvas>
+    <div class="stage-loop" id="stage-loop" hidden></div>
   </div>
 `;
 
@@ -252,6 +315,26 @@ export class App {
    * dropped on its own is a marker on the stage and nothing more until its partner lands.
    */
   private marks: LoopMarks = NO_MARKS;
+  /**
+   * The loops kept for the song that is open, newest song wins.
+   *
+   * Held here rather than read from storage each frame: they are drawn on every one of
+   * them, and the list is small enough that a copy is cheaper than a parse.
+   */
+  private savedLoops: SavedLoop[] = [];
+  /**
+   * Which kept loop is being practised, or null.
+   *
+   * None of them when a song opens, and none of them the moment a marker is dragged off
+   * one: the region is then a stretch of song that merely started life as a saved loop,
+   * and calling it by that name would mean the label in the corner of the stage was
+   * describing bars nobody is playing.
+   */
+  private activeLoopId: string | null = null;
+  /** The kept loop under the pointer, lit on the map while it is there. */
+  private hoverLoopId: string | null = null;
+  /** Whether the name box is open, and whether it is naming a new loop or an old one. */
+  private naming: "new" | "rename" | null = null;
   /**
    * True while a marker is being dragged.
    *
@@ -306,6 +389,14 @@ export class App {
       markStart: root.querySelector("#mark-start")!,
       markEnd: root.querySelector("#mark-end")!,
       markClear: root.querySelector("#mark-clear")!,
+      loopSave: root.querySelector("#loop-save")!,
+      loopDelete: root.querySelector("#loop-delete")!,
+      loopMarks: root.querySelector(".loop-marks")!,
+      loopNameForm: root.querySelector("#loop-name-form")!,
+      loopName: root.querySelector("#loop-name")!,
+      loopNameCancel: root.querySelector("#loop-name-cancel")!,
+      loopTip: root.querySelector("#loop-tip")!,
+      stageLoop: root.querySelector("#stage-loop")!,
       timeNow: root.querySelector("#time-now")!,
       timeTotal: root.querySelector("#time-total")!,
     };
@@ -448,7 +539,9 @@ export class App {
     this.el.markStart!.addEventListener("click", () => this.placeLoopMark("start"));
     this.el.markEnd!.addEventListener("click", () => this.placeLoopMark("end"));
     this.el.markClear!.addEventListener("click", () => this.clearLoopMarks());
+    this.wireSavedLoops();
     this.wireLoopKeys();
+    this.wireSpaceBar();
     this.wireSegment(this.el.hand!, "hand", (value) => {
       this.hand = value as HandSelection;
       this.rebuild();
@@ -487,6 +580,9 @@ export class App {
    */
   private wireTimeline(canvas: HTMLCanvasElement): void {
     new TimelineInput(canvas, {
+      onPick: (x, y) => this.pickSavedLoop(x, y),
+      onHover: (x, y) => this.hoverSavedLoop(x, y),
+      onLeave: () => this.hoverSavedLoop(null, null),
       onGrab: () => {
         this.resumeAfterSeek = this.conductor.isPlaying();
         this.conductor.pause();
@@ -554,8 +650,72 @@ export class App {
   /** Set the height of the song map, within what the map can usefully be drawn at. */
   private setTimelineHeight(height: number): void {
     this.timelineHeight = Math.min(MAX_TIMELINE_HEIGHT, Math.max(MIN_TIMELINE_HEIGHT, Math.round(height)));
-    (this.el.timeline as HTMLElement).style.height = `${this.timelineHeight}px`;
+    this.applyTimelineSize();
+  }
+
+  /**
+   * Give the canvas the map's height plus the lane's.
+   *
+   * The lane of saved loops is drawn on the same canvas but is not part of the map, so it
+   * is added to the height rather than taken out of it. Otherwise keeping your first loop
+   * on a song would silently shrink the picture of the song — the map would be paying for
+   * a strip about the map.
+   */
+  private applyTimelineSize(): void {
+    const height = this.timelineHeight + this.timeline.laneHeight;
+    (this.el.timeline as HTMLElement).style.height = `${height}px`;
     this.timeline.resize();
+  }
+
+  /**
+   * The space bar: play and pause, and nothing else, ever.
+   *
+   * A browser gives the space bar to whatever has the focus — it presses the button, ticks
+   * the tick box, opens the dropdown, scrolls the page. On a page of settings that is
+   * fine. Here it is not: the bar is the transport control, and the thing you reach for it
+   * to do is *stop the music*. Having it re-tick Loop instead, because Loop is what you
+   * last clicked, is the kind of small betrayal that makes you stop trusting the key.
+   *
+   * So it is taken at the window, in the capture phase, before the focused control can see
+   * it: pressed, released and repeated, whatever is under the focus ring. Nothing else in
+   * the app is allowed to answer it.
+   *
+   * Two things are left alone. A box you are typing in gets its space, because a space is
+   * a character. And with a screen up over the stage the bar does nothing at all — the run
+   * behind it is paused on purpose, and the bar has nothing to say about a song you cannot
+   * see — but it is still swallowed there, so it cannot press the button under the focus.
+   */
+  private wireSpaceBar(): void {
+    const onSpace = (e: KeyboardEvent): void => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return; // a combination, not the bar
+      if (isTyping(document.activeElement)) return;
+
+      // Claimed on both the press and the release. A button is activated by the *release*
+      // of the space bar, so stopping the press alone would leave the second half of the
+      // keystroke loose in an app that has just decided the bar means something else.
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.type !== "keydown" || e.repeat) return; // held down is one pause, not sixty
+      if (document.querySelector(".results-overlay")) return;
+      void this.onPlayToggle();
+    };
+    window.addEventListener("keydown", onSpace, true);
+    window.addEventListener("keyup", onSpace, true);
+
+    // Enter, on a tick box, does what the space bar no longer can.
+    //
+    // Buttons and links answer Enter as well as the bar, so taking the bar away costs them
+    // nothing. A checkbox answers only the bar — so Wait mode and Loop would have become
+    // unreachable without a mouse, which is too high a price for a transport key.
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.altKey) return;
+      const box = document.activeElement;
+      if (!(box instanceof HTMLInputElement) || box.type !== "checkbox") return;
+      e.preventDefault();
+      box.click();
+    });
   }
 
   /**
@@ -570,10 +730,13 @@ export class App {
       if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
       if (document.querySelector(".results-overlay")) return; // a screen is up over the stage
 
-      // Deliberately not skipped when the focus is inside a control. Nothing on this app
-      // takes typing — the settings are checkboxes, sliders and menus, none of which have
-      // any use for a bracket — and a shortcut that quietly stopped working because you
-      // last touched the section dropdown is a shortcut nobody trusts twice.
+      // Skipped only where a bracket is a character somebody is typing, which on this
+      // screen is the one box that names a loop. Everywhere else it is deliberately *not*
+      // skipped: the settings are checkboxes, sliders and menus, none of which have any
+      // use for a bracket, and a shortcut that quietly stopped working because you last
+      // touched the section dropdown is a shortcut nobody trusts twice.
+      if (isTyping(document.activeElement)) return;
+
       if (e.key === "[") this.placeLoopMark("start");
       else if (e.key === "]") this.placeLoopMark("end");
       else if (e.key === "\\") this.clearLoopMarks();
@@ -624,6 +787,7 @@ export class App {
     const now = this.conductor.time;
     const at = which === "end" ? this.renderer.timeAtTop(now) : now;
     this.marks = placeMark(this.marks, which, clampToSong(at, song.durationSec));
+    this.activeLoopId = null; // settling works out whether the new pair is a saved loop
 
     if (markedRegion(this.marks)) this.settleLoopMarks();
     // Only one point down: the other is still somewhere further through the song. There
@@ -656,6 +820,10 @@ export class App {
     }
     this.range = region;
     this.sectionId = loopSectionId(region);
+    // Re-read rather than remembered: a marker dragged off a saved loop's edge has left
+    // that loop, and one dragged back onto it has returned to it. Both are the same
+    // question — do these two times still describe something you named? — asked afresh.
+    this.activeLoopId = loopMatching(this.savedLoops, region)?.id ?? null;
     this.setLoop(true);
     this.rebuild(); // which starts the run at the top of the region — where you want to be
   }
@@ -664,18 +832,22 @@ export class App {
   private clearLoopMarks(): void {
     if (!this.baseSong) return;
     this.marks = NO_MARKS;
+    this.activeLoopId = null;
     this.dropRange(this.conductor.time);
   }
 
   /** Practise the whole song again, leaving the track where it is sitting. */
   private dropRange(at: number): void {
+    this.activeLoopId = null;
     if (this.range) {
       this.range = null;
       this.sectionId = "full";
       this.rebuild();
       this.session.seek(at);
+      return; // the rebuild has already put the chrome in step with all of this
     }
     this.showLoopMarks();
+    this.showSavedLoops();
   }
 
   /** Set loop mode and put the checkbox in step with it. */
@@ -710,6 +882,221 @@ export class App {
     label(this.el.markEnd!, this.marks.end, "Set end ⟧", (t) => `End ${t} ⟧`);
     (this.el.markClear as HTMLButtonElement).disabled =
       !ready || (this.marks.start === null && this.marks.end === null);
+  }
+
+  /**
+   * The controls that keep a loop: the name box, and the two buttons either side of it.
+   *
+   * Saving is deliberately a second gesture rather than something marking a region does
+   * for you. Most regions are marked to be played twice and thrown away, and a song that
+   * quietly accumulated a saved loop every time you pressed `]` would end up with a lane
+   * you had to clear out before you could read it.
+   */
+  private wireSavedLoops(): void {
+    this.el.loopSave!.addEventListener("click", () => this.beginNaming());
+    this.el.loopDelete!.addEventListener("click", () => this.forgetActiveLoop());
+    (this.el.loopNameForm as HTMLFormElement).addEventListener("submit", (e) => {
+      e.preventDefault();
+      this.commitName();
+    });
+    this.el.loopNameCancel!.addEventListener("click", () => this.endNaming());
+    this.el.loopName!.addEventListener("keydown", (e) => {
+      // Escape backs out of naming, and is caught here so it never reaches anything else
+      // on the page that might be listening for it.
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.endNaming();
+    });
+  }
+
+  /**
+   * Open the name box for the marked region — or for the loop it already is.
+   *
+   * A new loop arrives with "Loop 3" already in the box and selected, so keeping one is
+   * Save-then-Enter for anybody who does not want to think of a name, and Save-type-Enter
+   * for anybody who does.
+   */
+  private beginNaming(): void {
+    const region = markedRegion(this.marks);
+    if (!region) return;
+
+    const active = loopById(this.savedLoops, this.activeLoopId);
+    this.naming = active ? "rename" : "new";
+    const input = this.el.loopName as HTMLInputElement;
+    input.value = active ? active.name : defaultLoopName(this.savedLoops);
+    input.maxLength = MAX_LOOP_NAME;
+    this.el.loopMarks!.hidden = true;
+    this.el.loopNameForm!.hidden = false;
+    input.focus();
+    input.select();
+  }
+
+  /** Put the name box away and give the row of buttons back. */
+  private endNaming(): void {
+    if (this.naming === null) return;
+    this.naming = null;
+    this.el.loopNameForm!.hidden = true;
+    this.el.loopMarks!.hidden = false;
+    // Focus goes back to the button that opened the box; left on a hidden input it would
+    // land on the page body, and the bracket keys would start firing again mid-word.
+    this.el.loopSave!.focus();
+    this.showSavedLoops();
+  }
+
+  /** Keep the marked region under the typed name, or rename the loop it already is. */
+  private commitName(): void {
+    const region = markedRegion(this.marks);
+    const name = (this.el.loopName as HTMLInputElement).value;
+
+    if (region && this.naming === "rename" && this.activeLoopId !== null) {
+      this.savedLoops = renameLoop(this.savedLoops, this.activeLoopId, name);
+    } else if (region) {
+      const { loops, loop } = addLoop(this.savedLoops, name, region);
+      this.savedLoops = loops;
+      this.activeLoopId = loop.id; // what you just saved is what you are practising
+    }
+    this.storeLoops();
+    this.endNaming();
+    this.applySavedLoops();
+  }
+
+  /**
+   * Forget the saved loop being practised.
+   *
+   * The markers stay where they are and the run carries on over the same bars: what has
+   * been thrown away is the name and the band on the lane, not the passage. Deleting a
+   * bookmark should not also close the book at that page.
+   */
+  private forgetActiveLoop(): void {
+    const loop = loopById(this.savedLoops, this.activeLoopId);
+    if (!loop) return;
+    this.savedLoops = removeLoop(this.savedLoops, loop.id);
+    this.activeLoopId = null;
+    if (this.hoverLoopId === loop.id) this.hoverSavedLoop(null, null);
+    this.storeLoops();
+    this.applySavedLoops();
+  }
+
+  /** Write this song's loops back to storage. Called after every change to the list. */
+  private storeLoops(): void {
+    if (this.baseSong) saveLoops(this.baseSong.name, this.savedLoops);
+  }
+
+  /**
+   * Hand the current list of loops to the map and put the chrome in step with it.
+   *
+   * The canvas is resized here because the lane's height depends on how many loops
+   * overlap — saving one that sits under another makes the strip a row taller.
+   */
+  private applySavedLoops(): void {
+    this.timeline.setLoops(this.savedLoops);
+    this.applyTimelineSize();
+    this.showSavedLoops();
+    this.populateSections(); // the marked option is named after the loop when it is one
+  }
+
+  /**
+   * Say what can be done with loops right now, and which one is being played.
+   *
+   * The name sits over the top-left of the stage rather than in the timeline's head. It is
+   * the answer to "what am I practising?", and that question is asked while looking at the
+   * notes — a caption three strips up, among the buttons, is a caption nobody reads.
+   */
+  private showSavedLoops(): void {
+    const region = markedRegion(this.marks);
+    const active = loopById(this.savedLoops, this.activeLoopId);
+
+    const save = this.el.loopSave as HTMLButtonElement;
+    save.disabled = region === null;
+    save.textContent = active ? "✎ Rename" : "✚ Save loop";
+    save.title = active
+      ? `Give ${quoted(active.name)} a different name`
+      : "Keep this stretch under a name";
+
+    const forget = this.el.loopDelete as HTMLButtonElement;
+    forget.hidden = active === null;
+    forget.title = active ? `Forget ${quoted(active.name)}` : "";
+
+    this.showStageLoop(active);
+  }
+
+  /**
+   * Write the loop's name over the top-left of the stage.
+   *
+   * Rewritten only when the loop itself changes, and the fade is restarted by hand when it
+   * does. Every other call would otherwise replace the same two spans with themselves
+   * several times a run — and switching from one loop straight to another would swap the
+   * word silently, which is exactly the moment the caption most needs to be noticed.
+   */
+  private showStageLoop(active: SavedLoop | null): void {
+    const label = this.el.stageLoop!;
+    const shown = label.dataset.loop ?? "";
+    const now = active ? `${active.id}:${active.name}` : "";
+    label.hidden = active === null;
+    if (shown === now) return;
+
+    label.dataset.loop = now;
+    label.innerHTML = active
+      ? `<span class="stage-loop-name">${escapeHtml(active.name)}</span>` +
+        `<span class="stage-loop-time">${formatTime(active.start)}–${formatTime(active.end)}</span>`
+      : "";
+    // Taken off and put back on, with a read of the layout in between to force it: an
+    // animation that is already running does not start again just because its element's
+    // contents changed.
+    label.style.animation = "none";
+    void label.offsetWidth;
+    label.style.animation = "";
+  }
+
+  /**
+   * A press on the lane of saved loops: start playing that stretch.
+   *
+   * Returns whether the press was claimed, so a press anywhere else on the map still
+   * scrubs. Pressing the loop already being played switches it off and gives the whole
+   * song back — the same target turning the same thing on and off, which is what lets
+   * the lane be used without a second control for putting a loop away.
+   */
+  private pickSavedLoop(x: number, y: number): boolean {
+    const band = this.timeline.loopAt(x, y);
+    const loop = band && loopById(this.savedLoops, band.id);
+    if (!loop) return false;
+
+    if (this.activeLoopId === loop.id) this.clearLoopMarks();
+    else {
+      this.marks = marksOf(rangeOf(loop));
+      this.settleLoopMarks(); // which starts the run at the top of it
+    }
+    return true;
+  }
+
+  /**
+   * Light up the loop under the pointer and say what it is called.
+   *
+   * The band alone is a violet bar six pixels tall — enough to say *something is saved
+   * here*, and nothing like enough to choose between three of them. Hovering names it and
+   * lights the bars it holds down over the map, so which passage a loop is can be read
+   * before committing to it with a click.
+   */
+  private hoverSavedLoop(x: number | null, y: number | null): void {
+    const band = x === null || y === null ? null : this.timeline.loopAt(x, y);
+    this.hoverLoopId = band?.id ?? null;
+
+    const tip = this.el.loopTip!;
+    tip.hidden = band === null;
+    if (!band) return;
+
+    const loop = loopById(this.savedLoops, band.id);
+    tip.innerHTML =
+      `<span class="loop-tip-name">${escapeHtml(band.name)}</span>` +
+      (loop
+        ? `<span class="loop-tip-time">${formatTime(loop.start)}–${formatTime(loop.end)}</span>`
+        : "");
+    // Centred on the band and pinned just under it, so the label points at the bar it
+    // belongs to rather than at wherever the pointer happens to be along it.
+    const canvas = this.el.timeline as HTMLCanvasElement;
+    tip.style.left = `${canvas.offsetLeft + band.x + band.w / 2}px`;
+    tip.style.top = `${canvas.offsetTop + band.y + band.h + 5}px`;
   }
 
   /**
@@ -940,8 +1327,14 @@ export class App {
       this.handModes = defaultHandModes(this.baseSong);
       (this.el.tracks as HTMLButtonElement).disabled = this.baseSong.tracks.length === 0;
       this.sections = detectSections(this.baseSong);
+      // Every kept loop starts the song switched off. The lane says what is there; which
+      // of them you want today is a choice, and a song that opened straight into last
+      // night's eight bars would be answering it for you.
+      this.savedLoops = loadLoops(this.baseSong.name);
+      this.hoverLoopId = null;
+      this.endNaming();
       this.selectSection("full"); // a new song arrives whole, with no points marked on it
-      this.populateSections();
+      this.applySavedLoops();
       this.rebuild();
       void this.startPlaying();
     } catch (err) {
@@ -989,9 +1382,14 @@ export class App {
     }
     const marked = markedRegion(this.marks);
     if (marked && this.sectionId !== "full" && !this.sections.some((s) => s.id === this.sectionId)) {
-      options.push(
-        `<option value="${MARKED_SECTION}">⟦ ${formatTime(marked.start)}–${formatTime(marked.end)} ⟧</option>`,
-      );
+      // Named after the loop when the region is one you kept: the menu and the lane are
+      // two views of one choice, and a row reading "0:41–0:58" beside a band reading
+      // "Bridge" would not look like the same stretch of song.
+      const saved = loopById(this.savedLoops, this.activeLoopId);
+      const label = saved
+        ? escapeHtml(saved.name)
+        : `${formatTime(marked.start)}–${formatTime(marked.end)}`;
+      options.push(`<option value="${MARKED_SECTION}">⟦ ${label} ⟧</option>`);
     }
     select.innerHTML = options.join("");
     select.value = this.sections.some((s) => s.id === this.sectionId)
@@ -1015,11 +1413,15 @@ export class App {
     if (id === "full" || !this.baseSong) {
       this.range = null;
       this.marks = NO_MARKS;
+      this.activeLoopId = null;
       return;
     }
     const section = this.sections.find((s) => s.id === id) ?? fullSongSection(this.baseSong);
     this.range = { start: section.start, end: section.end };
     this.marks = marksOf(this.range);
+    // A detected section that happens to be exactly a loop you kept is that loop, and
+    // should be named as one — the two are the same stretch of music either way.
+    this.activeLoopId = loopMatching(this.savedLoops, this.range)?.id ?? null;
   }
 
   /** The song actually practised: the base MIDI simplified to the chosen difficulty. */
@@ -1053,6 +1455,7 @@ export class App {
     this.updatePlayButton();
     this.populateSections(); // the marked region may have just appeared on it, or left it
     this.showLoopMarks();
+    this.showSavedLoops();
     this.showRunScope(song);
   }
 
@@ -1068,10 +1471,14 @@ export class App {
   private showRunScope(song: Song): void {
     this.el.progress!.hidden = false;
 
-    // Named whenever the run is less than the whole song — a detected section by its
-    // number, a hand-picked region by the times it runs between.
+    // Named whenever the run is less than the whole song — a kept loop by the name you
+    // gave it, a detected section by its number, a hand-picked region by the times it
+    // runs between.
+    const saved = loopById(this.savedLoops, this.activeLoopId);
     this.el.progressScope!.textContent =
-      this.sectionId === "full" ? "" : sectionLabel(this.sectionId);
+      this.sectionId === "full" ? ""
+      : saved ? saved.name
+      : sectionLabel(this.sectionId);
     this.el.timeTotal!.textContent = formatTime(song.durationSec);
     this.el.timeline!.setAttribute("aria-valuemax", String(Math.round(song.durationSec)));
     this.shownTime = ""; // the clock is re-read next frame against the new song
@@ -1174,7 +1581,13 @@ export class App {
       loop: this.marks,
       wrap: this.wrapRegion(),
     });
-    this.timeline.render({ nowSec: now, region: this.range, marks: this.marks });
+    this.timeline.render({
+      nowSec: now,
+      region: this.range,
+      marks: this.marks,
+      hoverLoopId: this.hoverLoopId,
+      activeLoopId: this.activeLoopId,
+    });
     this.updateProgress(now);
 
     if (this.wasPlaying !== this.conductor.isPlaying()) this.updatePlayButton();

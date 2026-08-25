@@ -9,6 +9,7 @@
   --right: #5ac8fa;  /* right-hand note colour */
   --good: #6bd490;
   --bad: #ff6b6b;
+  --loop: #c08bff;   /* a kept loop: its own hue, shared with nothing else on the screen */
   --radius: 10px;
   color-scheme: dark;
 }
@@ -425,7 +426,10 @@ body {
   font-weight: 600;
 }
 
+/* Positioned, so the label that names a hovered loop can be pinned to the band it
+   belongs to rather than trailing the pointer around. */
 .timeline-body {
+  position: relative;
   padding: 0 16px 5px;
 }
 
@@ -480,6 +484,96 @@ body {
   gap: 5px;
 }
 
+/* ------------------------------------------------------------ the loop switch
+
+   Are we going round, or straight through?
+
+   It used to be a tick box up among the settings, two strips away from the markers that
+   decide *what* is looped - which is how you end up going round a passage you have just
+   switched off, hunting a 13px tick in a row of other 13px ticks. It is not a setting like
+   the others: it is the mode the transport is in, and it belongs beside the points that
+   bound it.
+
+   So it is the largest control on the row, it is a switch rather than a tick, and it says
+   what it is doing rather than just being on: the arrow turns for exactly as long as the
+   music is going round. Lit in the markers' own green, so the switch, the two points and
+   the seam on the map all read as one object. */
+.loop-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 15px;
+  margin-right: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid #000000;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* The tick box itself, invisible but covering the whole pill: the real control keeps the
+   clicks, the keyboard and the checked state, and the pill is what you see. */
+.loop-toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* A glyph rather than an emoji, so it takes the switch's own colour with it. */
+.loop-toggle-icon {
+  display: inline-block;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+.loop-toggle:hover {
+  background: #2b3040;
+}
+
+.loop-toggle:has(input:checked) {
+  background: #17301f;
+  border-color: #3d7a55;
+  color: var(--good);
+  box-shadow: 0 0 14px rgba(107, 212, 144, 0.22);
+}
+
+/* Turning, and only while it is looping. A still arrow says "this button is about
+   repeating"; a turning one says "you are going round right now", which is the question
+   actually being asked at the moment you reach for it. */
+.loop-toggle:has(input:checked) .loop-toggle-icon {
+  opacity: 1;
+  animation: loop-turning 2.6s linear infinite;
+}
+
+.loop-toggle:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes loop-turning {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loop-toggle:has(input:checked) .loop-toggle-icon {
+    animation: none;
+  }
+}
+
 .mark-btn {
   height: 26px;
   padding: 0 11px;
@@ -525,6 +619,101 @@ body {
   border-color: var(--bad);
 }
 
+/* ---------------------------------------------------------- the saved loops
+
+   The two markers describe a stretch; these are the stretches you kept. They live in the
+   violet nothing else on the screen uses, so a band on the map, its name under the
+   pointer and the title over the stage all read as one object - the same trick the green
+   markers play, in a colour that cannot be mistaken for them.
+
+   The strip itself is drawn on the timeline canvas; what is here is the chrome around it:
+   the buttons that keep and forget a loop, the box that names one, and the two captions
+   that say which loop you are on. */
+
+/* Hiding the row of loop buttons while the name box is up, and the box the rest of the
+   time. Both are flex containers, and `display: flex` beats the hidden attribute. */
+.loop-marks[hidden],
+.loop-name-form[hidden] {
+  display: none;
+}
+
+/* A hairline between marking a loop out and keeping it - two different jobs sharing one
+   group, and without it the row reads as five buttons that all do the same sort of thing. */
+.mark-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: #000000;
+}
+
+.loop-name-form {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+}
+
+/* Wide enough for a real name and no wider: it stands in the row the buttons were in, and
+   a box that took the whole strip would push the clock off the end of it. */
+.loop-name-input {
+  width: 200px;
+  height: 26px;
+  padding: 0 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid #000000;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.loop-name-input::placeholder {
+  color: var(--muted);
+}
+
+.loop-name-input:focus-visible {
+  outline: 2px solid var(--loop);
+  outline-offset: 1px;
+}
+
+/* The name of the loop under the pointer, pinned just below its band.
+
+   Never in the way: it sits over the top of the map with no pointer events of its own, so
+   it cannot flicker by stealing the hover from the very band it is describing. */
+.loop-tip {
+  position: absolute;
+  z-index: 5;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  max-width: 240px;
+  padding: 3px 8px;
+  background: #241a34;
+  border: 1px solid var(--loop);
+  border-radius: 7px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+}
+
+.loop-tip[hidden] {
+  display: none;
+}
+
+.loop-tip-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.loop-tip-time {
+  color: var(--loop);
+  font-variant-numeric: tabular-nums;
+}
+
 .piana-stage {
   flex: 1;
   min-height: 0;
@@ -567,6 +756,73 @@ body {
 .piana-stage canvas.over-mark,
 .piana-stage canvas.dragging-mark {
   cursor: ns-resize;
+}
+
+/* ------------------------------------------------- the loop you are playing
+
+   The name of the kept loop the run is on, in the top-left corner of the stage.
+
+   It is set apart from everything else on the screen on purpose. The chrome above is a
+   dense grid of sans-serif controls you operate; this is not a control - it is the title
+   of what you are doing, and it is read at a glance out of the corner of an eye already
+   watching notes fall. So: an old-style italic, letter-spaced, in the loop's own violet
+   with a breath of glow behind it, sitting over the music with nothing around it. Nothing
+   else in the app is allowed to look like this, which is what makes it legible as a
+   caption rather than as one more thing to click.
+
+   Only up while a saved loop is selected - the whole song needs no title. */
+.stage-loop {
+  position: absolute;
+  top: 12px;
+  left: 18px;
+  z-index: 4;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  max-width: calc(100% - 36px);
+  pointer-events: none;
+  animation: loop-name-in 260ms ease-out;
+}
+
+.stage-loop[hidden] {
+  display: none;
+}
+
+.stage-loop-name {
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-style: italic;
+  font-size: 21px;
+  line-height: 1.1;
+  letter-spacing: 0.015em;
+  color: var(--loop);
+  /* Two shadows: a tight black one so the name survives a bar of notes passing behind it,
+     and a wide violet one so it reads as lit rather than as pasted on. */
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.85),
+    0 0 22px rgba(192, 139, 255, 0.35);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-loop-time {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+}
+
+/* Rising a little as it fades in, so switching from one loop to another registers as a
+   change rather than as a word quietly swapping itself out. */
+@keyframes loop-name-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .midi-status {

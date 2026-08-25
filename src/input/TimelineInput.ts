@@ -8,6 +8,17 @@ export interface TimelineHandlers {
   onGrab: () => void;
   /** The hand has let go, so play may pick up again if it was playing when grabbed. */
   onRelease: () => void;
+  /**
+   * A press landed at this point. Return true to claim it, leaving the map alone.
+   *
+   * How the lane of saved loops sits on the same canvas as the scrubber: a press on a band
+   * is a choice of passage, not a jump to the moment the band happens to start at.
+   */
+  onPick: (x: number, y: number) => boolean;
+  /** The pointer is here and nothing is being dragged — for lighting up what is under it. */
+  onHover: (x: number, y: number) => void;
+  /** The pointer has left the map, so whatever was lit up should go out. */
+  onLeave: () => void;
 }
 
 /**
@@ -35,6 +46,7 @@ export class TimelineInput {
     this.canvas.addEventListener("pointermove", this.onMove);
     this.canvas.addEventListener("pointerup", this.onUp);
     this.canvas.addEventListener("pointercancel", this.onUp);
+    this.canvas.addEventListener("pointerleave", this.onOut);
   }
 
   disconnect(): void {
@@ -42,6 +54,7 @@ export class TimelineInput {
     this.canvas.removeEventListener("pointermove", this.onMove);
     this.canvas.removeEventListener("pointerup", this.onUp);
     this.canvas.removeEventListener("pointercancel", this.onUp);
+    this.canvas.removeEventListener("pointerleave", this.onOut);
     this.dragging = false;
   }
 
@@ -49,9 +62,16 @@ export class TimelineInput {
     return e.clientX - this.canvas.getBoundingClientRect().left;
   }
 
+  private yAt(e: PointerEvent): number {
+    return e.clientY - this.canvas.getBoundingClientRect().top;
+  }
+
   private onDown = (e: PointerEvent): void => {
     if (e.button !== PRIMARY_BUTTON) return;
     e.preventDefault();
+    // Offered to the lane first. A band is a small target sitting on top of a large one,
+    // so the specific thing under the pointer gets the press before the general one.
+    if (this.handlers.onPick(this.xAt(e), this.yAt(e))) return;
     this.dragging = true;
     this.canvas.setPointerCapture(e.pointerId);
     this.handlers.onGrab();
@@ -60,11 +80,16 @@ export class TimelineInput {
 
   private onMove = (e: PointerEvent): void => {
     if (this.dragging) this.handlers.onSeek(this.xAt(e));
+    else this.handlers.onHover(this.xAt(e), this.yAt(e));
   };
 
   private onUp = (): void => {
     if (!this.dragging) return;
     this.dragging = false;
     this.handlers.onRelease();
+  };
+
+  private onOut = (): void => {
+    this.handlers.onLeave();
   };
 }
