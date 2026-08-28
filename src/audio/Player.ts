@@ -21,10 +21,19 @@ export interface AudioPlayer {
   ensureStarted(): Promise<void>;
   /** Play a note for a fixed duration (used for auto-played parts). */
   triggerNote(midi: number, velocity: number, durationSec: number): void;
+  /**
+   * The same, for a note the mute button does not silence.
+   *
+   * Mute answers "don't play the song at me". A preview is you asking to hear something,
+   * now, and the only useful answer to that is the sound — a silent preview would just
+   * look like a broken one. Volume still applies: that knob is about how loud the app is
+   * allowed to be, which is a different question.
+   */
+  previewNote(midi: number, velocity: number, durationSec: number): void;
   /** Sustained press (used to echo the player's own key presses). */
   noteOn(midi: number, velocity: number): void;
   noteOff(midi: number): void;
-  /** Silence everything the app plays, without changing what it is doing. */
+  /** Silence the song the app is playing, without changing what it is doing. */
   setMuted(muted: boolean): void;
   /** Output level, 0 (silent) to 1 (full). */
   setVolume(level: number): void;
@@ -62,8 +71,16 @@ const NYQUIST_MARGIN = 0.45;
 export class PianoAudioPlayer implements AudioPlayer {
   private ctx: AudioContext | null = null;
 
-  /** Voices connect here; everything downstream is the shared room and output chain. */
-  private bus: GainNode | null = null;
+  /**
+   * Where every voice meets, and everything downstream is the room and the output chain.
+   *
+   * Two ways in, because the mute button is upstream of this rather than after it: an
+   * ordinary note goes through `muteGain` to get here and a preview connects straight to
+   * it. The room has to be on the far side of the mute — a tap taken before it would go
+   * on echoing notes that had just been silenced.
+   */
+  private mix: GainNode | null = null;
+  /** The mute button's own gain. Ordinary voices connect here. */
   private muteGain: GainNode | null = null;
   private volumeGain: GainNode | null = null;
   /** Reused by every hammer strike — allocating a noise buffer per note is not free. */
@@ -83,6 +100,9 @@ export class PianoAudioPlayer implements AudioPlayer {
    * and leave the engine holding a key the app thinks it released — so unmuting could come
    * back to a stuck note. Cutting the output stops the sound now and keeps every voice's
    * bookkeeping straight, mute or not.
+   *
+   * What it cuts is the song: previews join the chain past this point, since asking to
+   * hear a song is not something to answer with silence.
    */
   setMuted(muted: boolean): void {
     this.muted = muted;
@@ -117,16 +137,12 @@ export class PianoAudioPlayer implements AudioPlayer {
     this.ctx = ctx;
     this.noise = makeNoise(ctx);
 
-    // Output chain, from the speakers backwards: volume, mute, then a compressor that
-    // catches the peaks of a big chord so the master can sit high enough for a single
-    // quiet note to still be heard.
+    // Output chain, from the speakers backwards: volume, then a compressor that catches
+    // the peaks of a big chord so the master can sit high enough for a single quiet note
+    // to still be heard.
     this.volumeGain = ctx.createGain();
     this.volumeGain.gain.value = volumeToGain(this.volume);
     this.volumeGain.connect(ctx.destination);
-
-    this.muteGain = ctx.createGain();
-    this.muteGain.gain.value = this.muted ? 0 : 1;
-    this.muteGain.connect(this.volumeGain);
 
     const compressor = ctx.createDynamicsCompressor();
     compressor.threshold.value = -20;
@@ -134,12 +150,12 @@ export class PianoAudioPlayer implements AudioPlayer {
     compressor.ratio.value = 4;
     compressor.attack.value = 0.004;
     compressor.release.value = 0.25;
-    compressor.connect(this.muteGain);
+    compressor.connect(this.volumeGain);
 
     // A small room. Dry notes are the giveaway of a synthesised piano — a real one is
     // always heard in a space, and a little of one costs nothing here.
-    this.bus = ctx.createGain();
-    this.bus.connect(compressor);
+    this.mix = ctx.createGain();
+    this.mix.connect(compressor);
 
     const predelay = ctx.createDelay(0.1);
     predelay.delayTime.value = 0.014;
@@ -147,24 +163,44 @@ export class PianoAudioPlayer implements AudioPlayer {
     reverb.buffer = makeRoom(ctx);
     const wet = ctx.createGain();
     wet.gain.value = 0.22;
-    this.bus.connect(predelay);
+    this.mix.connect(predelay);
     predelay.connect(reverb);
     reverb.connect(wet);
     wet.connect(compressor);
+
+    // The mute, in front of the mix rather than behind it, so a preview can step around
+    // it by connecting to the mix directly.
+    this.muteGain = ctx.createGain();
+    this.muteGain.gain.value = this.muted ? 0 : 1;
+    this.muteGain.connect(this.mix);
 
     if (ctx.state === "suspended") await ctx.resume();
   }
 
   triggerNote(midi: number, velocity: number, durationSec: number): void {
-    const voice = this.startVoice(midi, velocity);
-    if (!voice) return;
-    // Auto-played notes are not held, so nothing else will ever damp them.
-    this.release(voice, voice.startedAt + Math.max(0.05, durationSec));
+    this.strike(midi, velocity, durationSec, this.muteGain);
+  }
+
+  previewNote(midi: number, velocity: number, durationSec: number): void {
+    this.strike(midi, velocity, durationSec, this.mix);
   }
 
   noteOn(midi: number, velocity: number): void {
-    const voice = this.startVoice(midi, velocity);
+    const voice = this.startVoice(midi, velocity, this.muteGain);
     if (voice) this.held.set(midi, voice);
+  }
+
+  /** A note of a fixed length, into whichever end of the chain the caller belongs at. */
+  private strike(
+    midi: number,
+    velocity: number,
+    durationSec: number,
+    destination: GainNode | null,
+  ): void {
+    const voice = this.startVoice(midi, velocity, destination);
+    if (!voice) return;
+    // Auto-played notes are not held, so nothing else will ever damp them.
+    this.release(voice, voice.startedAt + Math.max(0.05, durationSec));
   }
 
   noteOff(midi: number): void {
@@ -181,9 +217,9 @@ export class PianoAudioPlayer implements AudioPlayer {
    * without that a bright note would peak at several times the level of a mellow one for
    * the same velocity, and the compressor would spend its life undoing it.
    */
-  private startVoice(midi: number, velocity: number): Voice | null {
+  private startVoice(midi: number, velocity: number, destination: GainNode | null): Voice | null {
     const ctx = this.ctx;
-    if (!ctx || !this.bus) return null;
+    if (!ctx || !destination) return null;
 
     // Re-striking a key that is still sounding damps the old string first, the way the
     // hammer's own damper does; otherwise a repeated note stacks voice on voice.
@@ -225,7 +261,7 @@ export class PianoAudioPlayer implements AudioPlayer {
 
     const gain = ctx.createGain();
     gain.gain.value = 1;
-    gain.connect(this.bus);
+    gain.connect(destination);
 
     const oscillators: OscillatorNode[] = [];
     let longest = 0;

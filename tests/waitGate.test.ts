@@ -17,6 +17,7 @@ import { GameSession } from "../src/game/GameSession.ts";
 class SilentPlayer implements AudioPlayer {
   async ensureStarted() {}
   triggerNote() {}
+  previewNote() {}
   noteOn() {}
   noteOff() {}
   setMuted() {}

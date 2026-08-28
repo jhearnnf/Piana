@@ -170,19 +170,22 @@ function looksLikeMidi(p) {
 }
 
 /**
- * Read a `.mid` into the shape the renderer's loader already takes.
+ * A file and its bytes, in the shape the renderer's loader already takes.
  *
  * The bytes are copied out of the Buffer's pool into a standalone ArrayBuffer:
- * `fs.readFileSync` hands back a view into a shared allocation, and sending
- * that across the bridge would either carry unrelated bytes or arrive with a
+ * `fs.readFile` hands back a view into a shared allocation, and sending that
+ * across the bridge would either carry unrelated bytes or arrive with a
  * `byteOffset` the renderer would have to know about.
  */
-function readSong(file) {
-  const buf = fs.readFileSync(file);
+function songPayload(file, buf) {
   return {
     name: path.basename(file).replace(/\.midi?$/i, ''),
     data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
   };
+}
+
+function readSong(file) {
+  return songPayload(file, fs.readFileSync(file));
 }
 
 /** Show a song, or hold onto it until there is a window ready to show it in. */
@@ -259,6 +262,29 @@ function openSongFromFolder(name) {
   if (file === null) return false;
   openSong(file);
   return true;
+}
+
+/**
+ * Hand over a listed song's bytes without opening it.
+ *
+ * The song list plays a quick taste of whatever row you are pointing at, and that needs
+ * the file itself — but emphatically not the rest of what opening a song means: no window
+ * focus, no remembered folder, and no replacing the piece you are in the middle of. So it
+ * answers the caller instead of pushing the song at the app the way `openSong` does.
+ *
+ * Async, unlike its sibling, because this is triggered by the pointer moving down a list:
+ * a synchronous read of a file on a network share would freeze the whole shell mid-hover.
+ * An unreadable file is null rather than a dialog — nobody asked for it out loud.
+ */
+async function readSongFromFolder(name) {
+  const folder = songFolder(loadPrefs());
+  const file = folder === null ? null : resolveInFolder(folder, name);
+  if (file === null) return null;
+  try {
+    return songPayload(file, await fs.promises.readFile(file));
+  } catch {
+    return null;
+  }
 }
 
 async function pickSong() {
@@ -497,3 +523,4 @@ ipcMain.handle('song:pick', () => pickSong());
 ipcMain.handle('songs:list', () => listSongFolder());
 ipcMain.handle('songs:folder', () => chooseSongFolder());
 ipcMain.handle('songs:open', (_event, name) => openSongFromFolder(name));
+ipcMain.handle('songs:read', (_event, name) => readSongFromFolder(name));

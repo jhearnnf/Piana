@@ -1168,6 +1168,7 @@ body {
 
 /* Same column rhythm as the scores screen, so the two read as one idea. */
 .library-row {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr 54px 62px 190px 92px;
   align-items: center;
@@ -1183,6 +1184,33 @@ body {
    under the pointer is always the row Enter would play. */
 .library-row.active {
   background: var(--panel-2);
+}
+
+/* The row you are hearing. A bar in the row's own padding rather than anything in the
+   grid, so a song starting to play does not shuffle the columns it sits in; pulsing,
+   because the sound it marks is the one thing on this screen that is not still. */
+.library-row.previewing::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: preview-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes preview-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .library-row.previewing::after {
+    animation: none;
+  }
 }
 
 .library-title {

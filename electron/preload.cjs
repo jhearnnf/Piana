@@ -35,6 +35,12 @@ contextBridge.exposeInMainWorld('piana', {
   /** Open a listed song by file name. It arrives via `onOpenSong` like any other. */
   openSongNamed: (name) => ipcRenderer.invoke('songs:open', name),
 
+  /**
+   * The bytes of a listed song, without opening it — what the list's hover preview plays.
+   * Resolves to `{ name, data }`, or null if that file cannot be read.
+   */
+  readSongNamed: (name) => ipcRenderer.invoke('songs:read', name),
+
   /** File ▸ Songs… (Ctrl+L) — the shell asking the app to show its song list. */
   onShowSongs: (cb) => ipcRenderer.on('songs:show', () => cb()),
 });

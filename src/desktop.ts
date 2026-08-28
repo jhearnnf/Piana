@@ -36,6 +36,15 @@ export interface PianaDesktop {
    * so there is one path into the app however a song was chosen.
    */
   openSongNamed(file: string): Promise<boolean>;
+  /**
+   * The bytes of a listed song, without opening it, or null if it cannot be read.
+   *
+   * What the song list's hover preview plays. Separate from `openSongNamed` because
+   * hearing a song and switching to it are different requests, and only one of them
+   * should throw away the run you are in the middle of.
+   */
+  readSongNamed(file: string): Promise<OpenedSong | null>;
+
   /** File ▸ Songs… (Ctrl+L) — the shell asking the app to show its song list. */
   onShowSongs(callback: () => void): void;
 }

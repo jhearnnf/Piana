@@ -1,4 +1,4 @@
-import type { Difficulty, HandSelection, Song } from "../core/types.ts";
+import type { Difficulty, HandSelection, Note, Song } from "../core/types.ts";
 import { parseMidi } from "../midi/parseMidi.ts";
 import { PianoRenderer } from "../render/PianoRenderer.ts";
 import { visibleRange, type Zoom } from "../render/visibleRange.ts";
@@ -10,6 +10,7 @@ import type { NoteInputHandler } from "../input/InputSource.ts";
 import { Conductor } from "../game/Conductor.ts";
 import { PianoAudioPlayer } from "../audio/Player.ts";
 import { AutoPlayer } from "../game/AutoPlayer.ts";
+import { SongPreview } from "../game/SongPreview.ts";
 import { GameSession } from "../game/GameSession.ts";
 import type { TimeRange } from "../game/practice.ts";
 import {
@@ -90,6 +91,9 @@ const ALL_DEVICES = "";
 
 /** Menu value for the region marked by hand, which joins the section list once it exists. */
 const MARKED_SECTION = "marked";
+
+/** How many songs' notes to keep for the list's previews before dropping the oldest. */
+const MAX_PREVIEWS_KEPT = 24;
 
 /** How far an arrow key moves the playhead along the timeline, in seconds. Shift goes further. */
 const KEY_SEEK_STEP = 2;
@@ -293,6 +297,12 @@ export class App {
   private readonly audio = new PianoAudioPlayer();
   private readonly autoPlayer = new AutoPlayer(this.audio);
   private readonly session: GameSession;
+
+  /** The song list's hover preview, and the notes it has already had to read off disk. */
+  private readonly preview = new SongPreview(this.audio);
+  private readonly previewNotes = new Map<string, Note[]>();
+  /** Bumped by every preview request, so a slow read cannot land after you moved on. */
+  private previewToken = 0;
 
   private readonly pressed = new Set<number>();
   private readonly el: Record<string, HTMLElement>;
@@ -1317,8 +1327,54 @@ export class App {
       // which is what starts it playing — nothing to do here but ask.
       onOpen: (file) => void shell.openSongNamed(file),
       onChooseFolder: async () => view(await shell.chooseSongFolder()),
+      onPreview: (file) => this.previewSong(shell, file),
       onClose: () => {},
     });
+  }
+
+  /**
+   * Play a fast taste of a song in the list, or stop the one playing.
+   *
+   * The file is read and parsed here rather than by the list, and kept afterwards: going
+   * back and forth between two rows to compare them is the whole point of a preview, and
+   * it should not re-read the disk each time. Everything on the way is allowed to fail
+   * quietly — a preview that cannot be played is a row that stays silent, not an error
+   * message over a folder you were browsing.
+   */
+  private async previewSong(shell: PianaDesktop, file: string | null): Promise<void> {
+    this.preview.stop();
+    const token = ++this.previewToken;
+    if (file === null) return;
+
+    const notes = this.previewNotes.get(file) ?? (await this.readPreview(shell, file));
+    // Both awaits are chances for the pointer to have moved on since this was asked for.
+    if (!notes || token !== this.previewToken) return;
+    try {
+      await this.audio.ensureStarted();
+    } catch {
+      /* no audio here — the list still works, it is just quiet */
+    }
+    if (token !== this.previewToken) return;
+    await this.preview.play(notes);
+  }
+
+  /** Read and parse a listed song for its preview, remembering a few of them. */
+  private async readPreview(shell: PianaDesktop, file: string): Promise<Note[] | null> {
+    try {
+      const song = await shell.readSongNamed(file);
+      if (!song) return null;
+      const notes = parseMidi(song.data, song.name).notes;
+      // A folder can hold hundreds of songs and each one's notes are not small. Oldest
+      // out first: what you were just comparing is what you are about to come back to.
+      if (this.previewNotes.size >= MAX_PREVIEWS_KEPT) {
+        const oldest = this.previewNotes.keys().next();
+        if (!oldest.done) this.previewNotes.delete(oldest.value);
+      }
+      this.previewNotes.set(file, notes);
+      return notes;
+    } catch {
+      return null; // an unreadable or broken file simply does not preview
+    }
   }
 
   private loadSong(buffer: ArrayBuffer, name: string): void {

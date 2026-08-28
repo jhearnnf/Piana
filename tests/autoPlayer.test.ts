@@ -11,6 +11,7 @@ class MockPlayer implements AudioPlayer {
   fired: number[] = [];
   muted = false;
   async ensureStarted() {}
+  previewNote() {} // previews go the same way, and nothing here plays one
   triggerNote(midi: number) {
     this.fired.push(midi);
   }

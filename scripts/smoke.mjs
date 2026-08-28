@@ -869,6 +869,26 @@ check(
 );
 await fromArgv.screenshot({ path: path.join(SHOTS, "07-library.png") });
 
+// Pointing at a row plays a fast taste of that song. The sound itself cannot be heard from
+// here, but both halves of getting it can: the shell handing over a song's bytes without
+// opening it, and the mark that says which row you are listening to.
+const bytes = await fromArgv.evaluate(async () => {
+  const song = await window.piana.readSongNamed("twinkle-twinkle.mid");
+  return song?.data.byteLength ?? 0;
+});
+check("the shell hands over a listed song without opening it", bytes > 0, `${bytes} bytes`);
+check(
+  "reading a song for a preview leaves the loaded one alone",
+  /twinkle/i.test((await fromArgv.textContent("#song-name")) ?? ""),
+);
+
+await fromArgv.hover(".library-row");
+const previewing = await fromArgv
+  .waitForSelector(".library-row.previewing", { timeout: 5000 })
+  .then(() => true)
+  .catch(() => false);
+check("pointing at a song marks it as the one being played", previewing);
+
 // Searching narrows it, and a search that matches nothing empties it rather than
 // silently showing everything.
 await fromArgv.fill("#library-query", "twink");

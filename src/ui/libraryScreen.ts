@@ -10,9 +10,22 @@ import { dateLabel, escapeHtml, shortSetupLabel } from "./format.ts";
  * have I played, and how did I do?". So each row carries its best run: stars, points, the
  * setup that earned them, and when. Ones you have never finished say so plainly.
  *
- * Presentation only. The caller supplies the already-joined list and does the opening, so
- * this touches neither storage nor the shell.
+ * The row you are pointing at also plays itself, fast, so "which one is this?" has an
+ * answer that does not involve opening three files in turn.
+ *
+ * Presentation only. The caller supplies the already-joined list, does the opening, and
+ * makes the sound, so this touches neither storage nor the shell.
  */
+
+/**
+ * How long a row has to be the one you are pointing at before it starts playing.
+ *
+ * A beat, deliberately. Long enough that running the pointer down the list to reach
+ * something does not set off every song on the way, and that a song starting reads as an
+ * answer to where you stopped rather than a noise the list made; short enough that you
+ * are not left waiting on it.
+ */
+export const PREVIEW_DELAY_MS = 500;
 
 /** What the screen is showing: the folder, and the songs in it. */
 export interface LibraryView {
@@ -28,6 +41,12 @@ export interface LibraryCallbacks {
   onOpen: (file: string) => void;
   /** Pick a different folder. Resolves to what the new one contains. */
   onChooseFolder: () => Promise<LibraryView>;
+  /**
+   * Play a quick, sped-up taste of this song, or stop the one playing when given null.
+   * Resolving is how the screen knows the sound has stopped, so a row that has finished
+   * playing does not go on claiming to be playing.
+   */
+  onPreview: (file: string | null) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -133,9 +152,49 @@ export function showLibrary(
   let current = view;
   let shown: LibrarySong[] = [];
   let active = 0;
+  /** The song queued or sounding, so a pointer wobbling inside a row doesn't restart it. */
+  let previewing: string | null = null;
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** Move the highlight, keeping it on the list and in view. */
-  const highlight = (index: number): void => {
+  /** Silence the preview and take the mark off whichever row was wearing it. */
+  const stopPreview = (): void => {
+    clearTimeout(previewTimer);
+    previewTimer = undefined;
+    if (previewing === null) return;
+    previewing = null;
+    for (const row of body.querySelectorAll<HTMLElement>(".previewing")) {
+      row.classList.remove("previewing");
+    }
+    void callbacks.onPreview(null);
+  };
+
+  /** Line the highlighted song up to play, once the pointer has settled on it. */
+  const queuePreview = (): void => {
+    const song = shown[active];
+    if (song && song.file === previewing) return; // already the one you are hearing
+    stopPreview();
+    if (!song) return;
+
+    previewing = song.file;
+    const row = body.querySelector<HTMLElement>(`.library-row[data-index="${active}"]`);
+    previewTimer = setTimeout(() => {
+      row?.classList.add("previewing");
+      // The mark comes off when the sound stops rather than after a guessed number of
+      // seconds, so it is always telling the truth about what you can hear.
+      void Promise.resolve(callbacks.onPreview(song.file)).then(() => {
+        row?.classList.remove("previewing");
+      });
+    }, PREVIEW_DELAY_MS);
+  };
+
+  /**
+   * Move the highlight, keeping it on the list and in view.
+   *
+   * `preview` is off for the highlight the list puts up on its own, and on for every move
+   * you make: opening the screen is not asking to hear the first song in the folder, but
+   * arrowing onto a row or pointing at one is.
+   */
+  const highlight = (index: number, preview = false): void => {
     active = shown.length === 0 ? 0 : Math.min(Math.max(index, 0), shown.length - 1);
     for (const row of body.querySelectorAll<HTMLElement>(".library-row")) {
       const on = Number(row.dataset.index) === active;
@@ -145,9 +204,12 @@ export function showLibrary(
       row.scrollIntoView({ block: "nearest" });
       query.setAttribute("aria-activedescendant", row.id);
     }
+    if (preview) queuePreview();
   };
 
   const render = (): void => {
+    // The rows the preview was attached to are about to be replaced.
+    stopPreview();
     shown = filterLibrary(current.songs, query.value);
     body.innerHTML = bodyHtml(current, shown, currentSong);
     count.textContent = countLabel(current, shown.length);
@@ -159,6 +221,7 @@ export function showLibrary(
   };
 
   const dispose = (): void => {
+    stopPreview();
     overlay.remove();
     document.removeEventListener("keydown", onKey, true);
   };
@@ -182,7 +245,7 @@ export function showLibrary(
       close();
     } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      highlight(active + (e.key === "ArrowDown" ? 1 : -1));
+      highlight(active + (e.key === "ArrowDown" ? 1 : -1), true);
     } else if (e.key === "Enter") {
       const song = shown[active];
       if (!song) return;
@@ -200,7 +263,7 @@ export function showLibrary(
   });
   body.addEventListener("mousemove", (e) => {
     const row = (e.target as HTMLElement).closest<HTMLElement>(".library-row");
-    if (row) highlight(Number(row.dataset.index));
+    if (row) highlight(Number(row.dataset.index), true);
   });
 
   overlay.querySelector<HTMLButtonElement>("#library-choose")!.addEventListener("click", () => {
