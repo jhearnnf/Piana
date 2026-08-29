@@ -285,13 +285,20 @@ check(
 // point of wait mode, so this is checked with it off — and then put back, so the rest of
 // the run sees the app as it was.
 await page.uncheck("#wait");
-await page.click("#play");
+// Pressed only if the run is not already going. Playing is this app's resting state — a
+// settings change carries the transport across rather than stopping it — so a blind click
+// on Play here would be the thing that stops the clock this check is about.
+const ensurePlaying = async () => {
+  if (!/Pause/.test((await playReads()) ?? "")) await page.click("#play");
+  await page.waitForTimeout(150);
+};
+await ensurePlaying();
 await page.waitForTimeout(1400);
 const elapsed = await page.textContent("#time-now");
 const spoken = await page.getAttribute("#timeline", "aria-valuenow");
 check("the clock advances as the song plays", elapsed !== "0:00", `${elapsed}, aria-valuenow ${spoken}`);
 await page.check("#wait");
-await page.click("#play");
+await ensurePlaying();
 await page.waitForTimeout(300);
 await page.screenshot({ path: path.join(SHOTS, "02-playing.png") });
 
@@ -446,11 +453,29 @@ check(
 const scope = await page.textContent("#progress-scope");
 check("the progress strip names the region", /^Loop \d+:[0-5]\d/.test(scope ?? ""), scope ?? "");
 const regionStart = (await page.textContent("#mark-start")).replace(/\D*Start\s*/, "");
+// Within a second of the top rather than exactly on it: the region is playing by now, so
+// the clock has moved on a little — which is the point of the check below it.
+const seconds = (clock) => {
+  const [m, s] = clock.split(":").map(Number);
+  return m * 60 + s;
+};
+const startedAt = await playhead();
 check(
   "the run restarts at the top of the region",
-  (await playhead()) === regionStart,
-  `clock reads ${await playhead()}, region starts ${regionStart}`,
+  seconds(startedAt) - seconds(regionStart) <= 1 && seconds(startedAt) >= seconds(regionStart),
+  `clock reads ${startedAt}, region starts ${regionStart}`,
 );
+check(
+  "marking out a region plays it rather than waiting to be told to",
+  /Pause/.test((await page.textContent("#play")) ?? ""),
+  `#play reads "${await page.textContent("#play")}"`,
+);
+
+// Backed off the loop start first, which both stops the run and puts the start marker up
+// the stage where it can be seen: the region is playing by now, and a marker sitting on
+// the hit line the music has just left is a marker off the bottom of the stage.
+await page.mouse.wheel(0, 220);
+await page.waitForTimeout(300);
 
 // The markers themselves, counted off the canvas: the green they are drawn in appears
 // nowhere else on the stage, so any of it is the marks being drawn.
@@ -468,10 +493,8 @@ const markPixels = await page.evaluate(() => {
 });
 check("the loop markers are drawn on the stage", markPixels > 200, `${markPixels} marker pixels`);
 
-// Backed off the loop start, so the shot catches the marker up the stage with the music
-// outside the region veiled below it — which is the whole of what the region looks like.
-await page.mouse.wheel(0, 220);
-await page.waitForTimeout(300);
+// The shot that goes with it: the marker up the stage with the music outside the region
+// veiled below it — which is the whole of what a region looks like.
 await page.screenshot({ path: path.join(SHOTS, "07-loop-region.png") });
 
 /** The seconds a marker button is showing, or NaN if it has not been placed. */
@@ -569,6 +592,18 @@ await mapAt(midRegion);
 const wrapped = await litAbove();
 
 await page.uncheck("#loop");
+await page.waitForTimeout(250);
+// Off is off: the region stops fencing the run in, so the song is whole again and free to
+// play on past the end marker — while the markers themselves stay where they were put,
+// ready to be picked back up.
+check(
+  "turning Loop off lets the song out of the region",
+  (await page.inputValue("#section")) === "full"
+    && (await page.textContent("#progress-scope")) === ""
+    && /Start \d/.test((await page.textContent("#mark-start")) ?? ""),
+  `#section "${await page.inputValue("#section")}", scope "${await page.textContent("#progress-scope")}",`
+    + ` #mark-start "${await page.textContent("#mark-start")}"`,
+);
 await mapAt(midRegion);
 const notWrapped = await litAbove();
 check(
@@ -577,6 +612,12 @@ check(
   `${wrapped} lit pixels above the end point while looping, ${notWrapped} with Loop off`,
 );
 await page.check("#loop");
+await page.waitForTimeout(250);
+check(
+  "ticking Loop again picks the same region back up",
+  (await page.inputValue("#section")) === "marked",
+  `#section "${await page.inputValue("#section")}"`,
+);
 await mapAt(midRegion);
 await page.screenshot({ path: path.join(SHOTS, "09-loop-seam.png") });
 
@@ -748,6 +789,23 @@ if (overBand !== null) {
       && (await page.textContent(".stage-loop-name")) === "Chorus"
       && (await page.isChecked("#loop")),
   );
+  // Picked off the lane while the run was cleared and stopped, so the music running here
+  // is the click having started it: choosing a loop is asking to hear it.
+  check(
+    "clicking a saved loop plays it without a second press",
+    /Pause/.test((await page.textContent("#play")) ?? ""),
+    `#play reads "${await page.textContent("#play")}"`,
+  );
+  // And the space bar still stops it — playing by default is not playing regardless.
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(200);
+  check(
+    "the space bar still pauses a loop that started itself",
+    /Resume/.test((await page.textContent("#play")) ?? ""),
+    `#play reads "${await page.textContent("#play")}"`,
+  );
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(200);
 }
 await page.screenshot({ path: path.join(SHOTS, "11-loop-playing.png") });
 

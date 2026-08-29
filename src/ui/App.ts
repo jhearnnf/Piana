@@ -539,8 +539,7 @@ export class App {
     this.el.scores!.addEventListener("click", () => this.openScores());
     this.el.tracks!.addEventListener("click", () => this.openTracks());
     (this.el.loop as HTMLInputElement).addEventListener("change", (e) => {
-      this.setLoop((e.target as HTMLInputElement).checked);
-      this.rebuild();
+      this.toggleLoop((e.target as HTMLInputElement).checked);
     });
     (this.el.section as HTMLSelectElement).addEventListener("change", (e) => {
       this.selectSection((e.target as HTMLSelectElement).value);
@@ -835,7 +834,10 @@ export class App {
     // question — do these two times still describe something you named? — asked afresh.
     this.activeLoopId = loopMatching(this.savedLoops, region)?.id ?? null;
     this.setLoop(true);
-    this.rebuild(); // which starts the run at the top of the region — where you want to be
+    // Which starts the run at the top of the region — where you want to be — and starts it
+    // *playing*: settling a pair of markers, by hand or by clicking a loop you kept, is
+    // the request to hear that passage.
+    this.rebuild("play");
   }
 
   /** Throw the marked region away and go back to practising the whole song. */
@@ -858,6 +860,34 @@ export class App {
     }
     this.showLoopMarks();
     this.showSavedLoops();
+  }
+
+  /**
+   * Turn loop mode on or off from the tick box.
+   *
+   * Off means off. Merely stopping the wrap would leave the region still in force — the
+   * music fenced in by two markers and the run ending at the second one — which is not
+   * what anybody unticking Loop is asking for. They are asking to be let out: so the
+   * region stops being what is practised, and the song runs on from wherever the clock is
+   * sitting rather than being thrown back anywhere.
+   *
+   * The markers stay where you put them, on the stage and on their buttons, so ticking the
+   * box again picks the same passage back up, from the top of it. With no region marked
+   * out there is nothing to pick up and the whole song is the loop.
+   */
+  private toggleLoop(on: boolean): void {
+    this.setLoop(on);
+    if (on) {
+      if (markedRegion(this.marks)) this.settleLoopMarks();
+      else this.rebuild();
+      return;
+    }
+    const at = this.conductor.time;
+    if (this.range) this.dropRange(at); // which leaves the run where it is, playing on
+    else {
+      this.rebuild(); // the whole song already: only the transport's own wrap to undo
+      this.session.seek(at);
+    }
   }
 
   /** Set loop mode and put the checkbox in step with it. */
@@ -1392,7 +1422,7 @@ export class App {
       this.selectSection("full"); // a new song arrives whole, with no points marked on it
       this.applySavedLoops();
       this.rebuild();
-      void this.startPlaying();
+      this.startPlaying();
     } catch (err) {
       this.el.songName!.textContent = "Could not read that MIDI file";
       this.el.songMeta!.textContent = "";
@@ -1401,21 +1431,26 @@ export class App {
   }
 
   /**
-   * Start the run. Used by the Play button and by loading a song.
+   * Start the run. Used by the Play button, by loading a song, and by choosing a stretch
+   * of one to practise.
    *
-   * A song you just opened starts playing on its own: opening it *was* the request to
-   * play it, and with wait mode on the notes come to a stop at the first one and hold
-   * there, so nothing runs away before you have your hands on the keys.
+   * Playing is the resting state of this app. A song you just opened starts on its own —
+   * opening it *was* the request to play it — and so does a loop you just picked off the
+   * lane, because pointing at eight bars you saved last night is asking to hear them, not
+   * asking to be shown where they are. With wait mode on the notes come to a stop at the
+   * first one and hold there, so nothing runs away before you have your hands on the keys,
+   * and the space bar is always a press away from stopping the music.
    *
-   * The audio context needs a user gesture to start, which loading a file is — but if the
-   * browser disagrees, the run still begins silently rather than not at all.
+   * The audio context needs a user gesture to start, and it is unlocked *alongside* the
+   * run rather than before it: everything that gets here is already inside a gesture, and
+   * awaiting the browser would hand the transport back a frame or two after the click,
+   * out of step with the rest of the screen the same click is rebuilding. If the browser
+   * refuses anyway, the run still begins silently rather than not at all.
    */
-  private async startPlaying(): Promise<void> {
-    try {
-      await this.audio.ensureStarted();
-    } catch (err) {
+  private startPlaying(): void {
+    void this.audio.ensureStarted().catch((err) => {
       console.warn("Audio could not start yet — press a key or Play to enable sound.", err);
-    }
+    });
     this.session.start();
     this.updatePlayButton();
   }
@@ -1485,13 +1520,25 @@ export class App {
     return this.baseSong ? applyDifficulty(this.baseSong, this.difficulty) : null;
   }
 
-  /** Re-apply all current settings to the renderer and session. Resets the run. */
-  private rebuild(): void {
+  /**
+   * Re-apply all current settings to the renderer and session. Resets the run.
+   *
+   * Configuring the session rewinds it and stops the clock, so the transport has to be
+   * put back afterwards or every settings change would be a silent full stop. `"keep"`
+   * carries whatever the transport was doing across the rebuild — change hand or
+   * difficulty mid-run and the music keeps going, from the top of the stretch you are
+   * practising. `"play"` starts it whatever it was doing, which is what choosing a
+   * passage means.
+   */
+  private rebuild(transport: "keep" | "play" = "keep"): void {
     // Hands are settled first, on the *whole* song: difficulty thins the texture, and an
     // auto split reading a piece with notes already missing reads it wrong. This mutates
     // `baseSong` in place, so everything downstream — including a later zoom change that
     // rebuilds the practice song on its own — sees the same assignment.
     if (this.baseSong) applyHandModes(this.baseSong, this.handModes);
+    // Asked of the clock, not of the session: a run is still "running" while it is paused,
+    // and a rebuild must not answer a settings change by restarting music you stopped.
+    const wasPlaying = this.conductor.isPlaying();
 
     const song = this.practiceSong();
     if (!song) return;
@@ -1508,6 +1555,11 @@ export class App {
     });
     this.el.songName!.textContent = song.name;
     this.el.songMeta!.textContent = `${song.notes.length} notes`;
+    // Before the button is drawn, so it is never briefly labelled Play over a run that is
+    // already going. Started here rather than by each caller because the run has to be
+    // restarted *after* the session has been reconfigured, which is what `configure` above
+    // has just undone.
+    if (transport === "play" || wasPlaying) this.startPlaying();
     this.updatePlayButton();
     this.populateSections(); // the marked region may have just appeared on it, or left it
     this.showLoopMarks();
@@ -1583,7 +1635,7 @@ export class App {
   private async onPlayToggle(): Promise<void> {
     if (!this.baseSong) return;
     if (this.session.getState() !== "running") {
-      await this.startPlaying();
+      this.startPlaying();
       return;
     }
     await this.audio.ensureStarted(); // needs a user gesture
