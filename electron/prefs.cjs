@@ -3,10 +3,15 @@
 /**
  * Preferences the shell keeps, as opposed to the ones the app keeps.
  *
- * Only one so far: the folder the Open dialog should start in. It has to live out here
- * because it is about a native dialog and a filesystem path — the renderer never sees
- * either, and `localStorage` (where the app's own settings go) is the wrong place for
- * something the sandbox side has no business knowing.
+ * Two of them: the folder the Open dialog should start in, and the sample library the
+ * sampled instruments are read from. Both live out here because both are about a native
+ * dialog and a filesystem path — the renderer never sees either, and `localStorage` (where
+ * the app's own settings go) is the wrong place for something the sandbox side has no
+ * business knowing.
+ *
+ * Note what is *not* here: which instrument is selected. That is a choice about how the
+ * app should sound, and belongs with volume and mute in the app's own settings; only the
+ * path it is a name inside of is the shell's business.
  *
  * Pure, so it can be tested without an Electron process: the caller does the reading and
  * writing and passes in what it found.
@@ -25,6 +30,12 @@ function parsePrefs(text) {
 /** The stored song folder, or null if there isn't a usable one. */
 function songFolder(prefs) {
   const folder = prefs && prefs.songFolder;
+  return typeof folder === 'string' && folder !== '' ? folder : null;
+}
+
+/** The stored sample library folder, or null if there isn't a usable one. */
+function instrumentFolder(prefs) {
+  const folder = prefs && prefs.instrumentFolder;
   return typeof folder === 'string' && folder !== '' ? folder : null;
 }
 
@@ -49,4 +60,4 @@ function startFolder(prefs, exists, fallback) {
   return undefined;
 }
 
-module.exports = { parsePrefs, songFolder, startFolder };
+module.exports = { parsePrefs, songFolder, instrumentFolder, startFolder };

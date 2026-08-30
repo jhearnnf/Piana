@@ -1,9 +1,15 @@
 import type { InputSource, NoteInputHandler } from "./InputSource.ts";
+import { isTyping } from "./typing.ts";
 
 /**
  * Fallback input using the computer keyboard, so the app is testable without a MIDI piano.
  * Two rows map to a chromatic span; Z / X shift the octave. Not meant to replace a real
  * keyboard — just to let us develop and demo the game logic anywhere.
+ *
+ * Listened for on the window, so the piano answers wherever you are on the page — and
+ * therefore kept out of anything you are typing into. See `isTyping`: a letter heard as a
+ * note is also a letter whose default is prevented, so without that, searching the sounds
+ * for "flute" plays a chord and puts nothing in the box.
  */
 
 // Physical key -> semitone offset from the base note (C).
@@ -50,6 +56,10 @@ export class ComputerKeyboardInput implements InputSource {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+    // Before the octave shift as well as before the notes: Z and X are letters too, and
+    // silently moving the piano an octave while someone types "Zoo Book" is the same bug
+    // wearing a quieter coat.
+    if (isTyping(e.target)) return;
     const key = e.key.toLowerCase();
 
     if (key === "z") {
@@ -68,6 +78,14 @@ export class ComputerKeyboardInput implements InputSource {
     this.handler?.noteOn(midi, 0.8);
   };
 
+  /**
+   * Not guarded, unlike the way down, and deliberately.
+   *
+   * A key that was never heard as a note is not in `held`, so nothing here fires for one
+   * typed into a box. But a key pressed on the piano and released after the focus moved
+   * into one *is* in `held`, and has to be let go — a guard here would leave that note
+   * sounding for the life of the app.
+   */
   private onKeyUp = (e: KeyboardEvent): void => {
     const key = e.key.toLowerCase();
     const midi = this.midiFor(key);

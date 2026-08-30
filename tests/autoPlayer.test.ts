@@ -17,6 +17,7 @@ class MockPlayer implements AudioPlayer {
   }
   noteOn() {}
   noteOff() {}
+  setSustain() {} // the auto-played part is never pedalled — see `setSustain`
   setMuted(muted: boolean) {
     this.muted = muted;
   }

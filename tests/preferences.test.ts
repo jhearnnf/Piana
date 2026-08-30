@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_VOLUME,
+  parseInstruments,
   parseMidiDevice,
   parseVolume,
   parseWaitMode,
@@ -91,5 +92,60 @@ describe("parseMidiDevice", () => {
   it("keeps names a keyboard might really report", () => {
     expect(parseMidiDevice("  CASIO USB-MIDI  ")).toBe("CASIO USB-MIDI");
     expect(parseMidiDevice("{}")).toBe("{}");
+  });
+});
+
+describe("parseInstruments", () => {
+  it("plays the built-in piano for a first-time user", () => {
+    expect(parseInstruments(null)).toEqual([]);
+    expect(parseInstruments("")).toEqual([]);
+  });
+
+  it("reads back a stack, in the order it was chosen", () => {
+    const raw = JSON.stringify([
+      { name: "Grand Piano", level: 1 },
+      { name: "Ancient Choir", level: 0.4 },
+    ]);
+    expect(parseInstruments(raw)).toEqual([
+      { name: "Grand Piano", level: 1 },
+      { name: "Ancient Choir", level: 0.4 },
+    ]);
+  });
+
+  /** A sound you asked to hear, with no level recorded, is a sound you want all of. */
+  it("takes a missing or unreadable level as full", () => {
+    expect(parseInstruments(JSON.stringify([{ name: "Vibes" }]))).toEqual([
+      { name: "Vibes", level: 1 },
+    ]);
+    expect(parseInstruments(JSON.stringify([{ name: "Vibes", level: "loud" }]))).toEqual([
+      { name: "Vibes", level: 1 },
+    ]);
+  });
+
+  it("clamps a level rather than dropping the instrument", () => {
+    const raw = JSON.stringify([{ name: "a", level: 1.4 }, { name: "b", level: -2 }]);
+    expect(parseInstruments(raw)).toEqual([
+      { name: "a", level: 1 },
+      { name: "b", level: 0 },
+    ]);
+  });
+
+  it("skips entries that are not instruments, keeping the ones that are", () => {
+    const raw = JSON.stringify([null, 7, { level: 1 }, { name: "" }, { name: "Vibes", level: 0.5 }]);
+    expect(parseInstruments(raw)).toEqual([{ name: "Vibes", level: 0.5 }]);
+  });
+
+  it("has nothing to restore from junk", () => {
+    expect(parseInstruments("not json")).toEqual([]);
+    expect(parseInstruments(JSON.stringify({ name: "Vibes" }))).toEqual([]);
+  });
+
+  /**
+   * Whatever the folder is called. There is no list of valid instruments here to check a
+   * name against — the caller has that, and drops the ones its library does not have.
+   */
+  it("keeps names a sample library might really use", () => {
+    const raw = JSON.stringify([{ name: "S.K.Y. Keys", level: 1 }]);
+    expect(parseInstruments(raw)[0]?.name).toBe("S.K.Y. Keys");
   });
 });

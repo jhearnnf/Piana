@@ -11,6 +11,14 @@ export interface NoteInputHandler {
   noteOn(midi: number, velocity: number): void;
   /** A key was released. */
   noteOff(midi: number): void;
+  /**
+   * The sustain pedal went down, or came up.
+   *
+   * Part of playing rather than a setting, which is why it lives here beside the notes:
+   * the pedal is the third thing your body does to a piano, and a source that has one
+   * reports it the same way it reports a key. Sources without one simply never call it.
+   */
+  sustain(down: boolean): void;
 }
 
 export interface InputSource {

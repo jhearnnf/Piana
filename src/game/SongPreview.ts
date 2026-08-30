@@ -102,6 +102,7 @@ export class SongPreview {
       previewNote: () => {},
       noteOn: () => {},
       noteOff: () => {},
+      setSustain: () => {},
       setMuted: () => {},
       setVolume: () => {},
     });

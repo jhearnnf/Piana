@@ -100,6 +100,7 @@ describe("SongPreview", () => {
           fired.push({ midi, velocity, duration, throughMute: false }),
         noteOn: () => {},
         noteOff: () => {},
+        setSustain: () => {},
         setMuted: () => {},
         setVolume: () => {},
       },

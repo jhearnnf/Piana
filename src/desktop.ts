@@ -22,6 +22,29 @@ export interface SongFolder {
   error?: string;
 }
 
+/** What the shell found in the sample library folder. */
+export interface InstrumentFolder {
+  /** The library listed, or null if one has never been chosen. */
+  folder: string | null;
+  /** Instrument names in it, already sorted. Names only — the shell owns the paths. */
+  names: string[];
+  /** Why it could not be read, if it could not. */
+  error?: string;
+}
+
+/** One recorded note: which note it is, and the file it is in. */
+export interface SampleRef {
+  midi: number;
+  file: string;
+}
+
+/** Which notes an instrument has recordings of. */
+export interface InstrumentMap {
+  instrument: string;
+  /** In pitch order, one file per note. */
+  samples: SampleRef[];
+}
+
 export interface PianaDesktop {
   /** Open the native file picker. The result arrives through `onOpenSong`. */
   pickSong(): Promise<void>;
@@ -47,6 +70,15 @@ export interface PianaDesktop {
 
   /** File ▸ Songs… (Ctrl+L) — the shell asking the app to show its song list. */
   onShowSongs(callback: () => void): void;
+
+  /** List the instruments in the sample library folder. */
+  listInstruments(): Promise<InstrumentFolder>;
+  /** Native folder picker for the sample library. Resolves to the new listing. */
+  chooseInstrumentFolder(): Promise<InstrumentFolder>;
+  /** Which notes an instrument has recordings of, or null if it cannot be read. */
+  instrumentMap(name: string): Promise<InstrumentMap | null>;
+  /** One sample's bytes, or null. An unreadable file is a gap, not a failure. */
+  readSample(name: string, file: string): Promise<ArrayBuffer | null>;
 }
 
 declare global {

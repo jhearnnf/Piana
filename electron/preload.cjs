@@ -43,4 +43,22 @@ contextBridge.exposeInMainWorld('piana', {
 
   /** File ▸ Songs… (Ctrl+L) — the shell asking the app to show its song list. */
   onShowSongs: (cb) => ipcRenderer.on('songs:show', () => cb()),
+
+  /** The instruments in the sample library folder: `{ folder, names, error? }`. */
+  listInstruments: () => ipcRenderer.invoke('instruments:list'),
+
+  /** Native folder picker for the sample library. Resolves to the new listing. */
+  chooseInstrumentFolder: () => ipcRenderer.invoke('instruments:folder'),
+
+  /** Which notes an instrument has recordings of: `{ instrument, samples }`, or null. */
+  instrumentMap: (name) => ipcRenderer.invoke('instruments:map', name),
+
+  /**
+   * One sample's bytes, as an ArrayBuffer, or null.
+   *
+   * A file at a time rather than the whole instrument at once: a sampled piano is well
+   * over a hundred megabytes, and asked for in one reply it would be a hundred megabytes
+   * of silence before the first note.
+   */
+  readSample: (name, file) => ipcRenderer.invoke('instruments:sample', name, file),
 });

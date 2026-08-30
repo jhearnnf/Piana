@@ -56,9 +56,20 @@ class FakeSource extends FakeNode {
   buffer: unknown = null;
   loop = false;
   loopEnd = 0;
+  readonly playbackRate = new FakeParam();
+  onended: (() => void) | null = null;
   start(): void {}
   stop(): void {}
 }
+
+/** A decoded recording, short enough that nothing thinks to trim it. */
+const RECORDING = {
+  duration: 1,
+  numberOfChannels: 1,
+  sampleRate: 48000,
+  length: 48000,
+  getChannelData: () => new Float32Array(48000),
+};
 
 class FakeContext {
   currentTime = 0;
@@ -115,6 +126,9 @@ class FakeContext {
     return { duration: length / this.sampleRate, getChannelData: () => data };
   }
   async resume(): Promise<void> {}
+  async decodeAudioData(): Promise<unknown> {
+    return RECORDING;
+  }
 }
 
 /** Everything sound can get to from `node`, itself included. */
@@ -206,5 +220,271 @@ describe("where a note is wired", () => {
     const { player, mute } = await started();
     player.setMuted(false);
     expect(mute.gain.targets).toEqual([0, 1]);
+  });
+
+  /**
+   * The sustain pedal, which is the one control that changes what a *release* means.
+   *
+   * A voice is picked out here by the gain that gets ramped to zero — dropping a damper is
+   * the only thing that does that to a voice — so these are assertions about whether the
+   * damper fell, which is exactly what the pedal decides.
+   */
+  describe("the sustain pedal", () => {
+    /** Did this note's damper come down? */
+    const damped = (voice: FakeGain): boolean => voice.gain.targets.includes(0);
+
+    it("lets a released key go on ringing while it is down", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+
+      const voice = voiceOf(ctx, () => player.noteOn(60, 0.8));
+      player.noteOff(60);
+      expect(damped(voice)).toBe(false);
+    });
+
+    it("drops every damper it was holding when it comes up", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+
+      const first = voiceOf(ctx, () => player.noteOn(60, 0.8));
+      const second = voiceOf(ctx, () => player.noteOn(64, 0.8));
+      player.noteOff(60);
+      player.noteOff(64);
+      expect(damped(first)).toBe(false);
+
+      player.setSustain(false);
+      expect(damped(first)).toBe(true);
+      expect(damped(second)).toBe(true);
+    });
+
+    /** The pedal holds what has been let go of. A key still down is held by the finger. */
+    it("leaves a key that is still down alone when it comes up", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+      const voice = voiceOf(ctx, () => player.noteOn(60, 0.8));
+
+      player.setSustain(false);
+      expect(damped(voice)).toBe(false);
+
+      player.noteOff(60);
+      expect(damped(voice)).toBe(true);
+    });
+
+    it("damps a released key as usual when it is up", async () => {
+      const { ctx, player } = await started();
+      const voice = voiceOf(ctx, () => player.noteOn(60, 0.8));
+      player.noteOff(60);
+      expect(damped(voice)).toBe(true);
+    });
+
+    /**
+     * What a real piano does: with the pedal down a repeated note thickens rather than
+     * restarting, because the first string was never damped.
+     */
+    it("lets the same note ring twice over", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+
+      const first = voiceOf(ctx, () => player.noteOn(60, 0.8));
+      player.noteOff(60);
+      const second = voiceOf(ctx, () => player.noteOn(60, 0.8));
+
+      expect(second).not.toBe(first);
+      expect(damped(first)).toBe(false);
+
+      player.setSustain(false);
+      expect(damped(first)).toBe(true);
+    });
+
+    it("does nothing at all for a pedal pressed twice", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+      const voice = voiceOf(ctx, () => player.noteOn(60, 0.8));
+      player.noteOff(60);
+
+      player.setSustain(true); // a pedal that repeats its message
+      expect(damped(voice)).toBe(false);
+    });
+
+    /**
+     * The accompaniment is not pedalled: its notes came out of the file with their own
+     * durations, and smearing the part you are playing along to would make it harder to
+     * hear against — which is the one thing it is there for.
+     */
+    it("does not hold the auto-played part", async () => {
+      const { ctx, player } = await started();
+      player.setSustain(true);
+      const voice = voiceOf(ctx, () => player.triggerNote(60, 0.8, 0.5));
+      expect(damped(voice)).toBe(true); // damped on its own duration, pedal or no pedal
+    });
+  });
+
+  /**
+   * A sampled note is a different way of making the sound and nothing else. It hangs off
+   * the same damper, behind the same mute, through the same room — which is the whole
+   * claim of `setInstruments`, and the one part of it that only shows up in the graph.
+   */
+  describe("with a sampled instrument loaded", () => {
+    /**
+     * An instrument with a recording of middle C and a hole where the top one should be —
+     * a library part-way through loading, or one with a file that would not read.
+     */
+    async function sampled() {
+      const running = await started();
+      await running.player.setInstruments([
+        {
+          name: "Grand Piano",
+          samples: [
+            { midi: 60, file: "060-one.flac" },
+            { midi: 84, file: "084-one.flac" },
+          ],
+          read: async (file: string) => (file === "084-one.flac" ? null : new ArrayBuffer(8)),
+        },
+      ]);
+      return running;
+    }
+
+    it("plays the recording rather than the synth", async () => {
+      const { ctx, player } = await sampled();
+      const before = ctx.gains.length;
+      player.triggerNote(60, 0.8, 0.5);
+      // Three: the damper, the velocity envelope and this layer's blend. A synthesised
+      // note would have made a dozen, one per partial.
+      expect(ctx.gains.length - before).toBe(3);
+    });
+
+    it("still sends the song's notes through the mute", async () => {
+      const { ctx, player, mute, destination } = await sampled();
+      const voice = voiceOf(ctx, () => player.triggerNote(60, 0.8, 0.5));
+      const path = downstream(voice);
+
+      expect(path.has(mute)).toBe(true);
+      expect(path.has(destination)).toBe(true);
+    });
+
+    it("still takes a preview round it", async () => {
+      const { ctx, player, mute, destination } = await sampled();
+      const path = downstream(voiceOf(ctx, () => player.previewNote(60, 0.8, 0.5)));
+
+      expect(path.has(mute)).toBe(false);
+      expect(path.has(destination)).toBe(true);
+    });
+
+    /**
+     * The fallback that makes a library load in the background instead of behind a
+     * progress bar: a note the instrument has no recording for is still played, by the
+     * synth, rather than being dropped.
+     */
+    it("falls back to the synth for a note it has no recording of", async () => {
+      const { ctx, player, mute } = await sampled();
+      const before = ctx.gains.length;
+      const voice = voiceOf(ctx, () => player.triggerNote(84, 0.8, 0.5));
+
+      expect(ctx.gains.length - before).toBeGreaterThan(3); // a partial each
+      expect(downstream(voice).has(mute)).toBe(true);
+    });
+
+    it("goes back to the synth when the instrument is taken away", async () => {
+      const { ctx, player } = await sampled();
+      await player.setInstruments([]);
+      expect(player.instrumentNames).toEqual([]);
+
+      const before = ctx.gains.length;
+      player.triggerNote(60, 0.8, 0.5);
+      expect(ctx.gains.length - before).toBeGreaterThan(3);
+    });
+  });
+
+  /**
+   * Layering: several instruments sounding on one note. The thing that has to hold is that
+   * they are one *note* — one damper, one release, one voice — however many recordings
+   * went into it. Two notes that happened to start together would come apart the moment a
+   * key was let go.
+   */
+  describe("with two instruments layered", () => {
+    async function layered() {
+      const running = await started();
+      await running.player.setInstruments([
+        {
+          name: "Grand Piano",
+          samples: [{ midi: 60, file: "piano.flac" }],
+          read: async () => new ArrayBuffer(8),
+        },
+        {
+          name: "Ancient Choir",
+          samples: [{ midi: 60, file: "choir.flac" }],
+          level: 0.4,
+          read: async () => new ArrayBuffer(8),
+        },
+      ]);
+      return running;
+    }
+
+    it("loads both, in the order they were chosen", async () => {
+      const { player } = await layered();
+      expect(player.instrumentNames).toEqual(["Grand Piano", "Ancient Choir"]);
+    });
+
+    it("puts both recordings behind the same damper", async () => {
+      const { ctx, player, mute, destination } = await layered();
+      const voice = voiceOf(ctx, () => player.triggerNote(60, 0.8, 0.5));
+      const path = downstream(voice);
+
+      // Two envelopes and two blends hanging off the one damper, and one way out.
+      expect(path.has(mute)).toBe(true);
+      expect(path.has(destination)).toBe(true);
+    });
+
+    it("gives each layer its own level, set where it was asked for", async () => {
+      const { ctx, player } = await layered();
+      const before = ctx.gains.length;
+      player.triggerNote(60, 0.8, 0.5);
+
+      // Damper, then two (envelope, blend) pairs — one per layer.
+      const made = ctx.gains.slice(before);
+      expect(made).toHaveLength(5);
+      expect(made.map((gain) => gain.gain.value)).toContain(0.4);
+    });
+
+    /** A blend is aimed by ear, so it has to reach the chord already under your hands. */
+    it("moves a level on a note that is already sounding", async () => {
+      const { ctx, player } = await layered();
+      const before = ctx.gains.length;
+      player.noteOn(60, 0.8);
+      const made = ctx.gains.slice(before);
+
+      player.setInstrumentLevel("Ancient Choir", 0.9);
+      const ramped = made.filter((gain) => gain.gain.targets.includes(0.9));
+      expect(ramped).toHaveLength(1);
+    });
+
+    it("ignores a level for an instrument that is not in the stack", async () => {
+      const { player } = await layered();
+      expect(() => player.setInstrumentLevel("Nothing At All", 0.5)).not.toThrow();
+    });
+
+    it("keeps an instrument that is still wanted when another is added", async () => {
+      const { player } = await layered();
+      let reread = false;
+
+      await player.setInstruments([
+        {
+          name: "Grand Piano",
+          samples: [{ midi: 60, file: "piano.flac" }],
+          read: async () => {
+            reread = true;
+            return new ArrayBuffer(8);
+          },
+        },
+        {
+          name: "Vibes",
+          samples: [{ midi: 60, file: "vibes.flac" }],
+          read: async () => new ArrayBuffer(8),
+        },
+      ]);
+
+      expect(player.instrumentNames).toEqual(["Grand Piano", "Vibes"]);
+      expect(reread).toBe(false); // it never stopped playing, so it was never reloaded
+    });
   });
 });

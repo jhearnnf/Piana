@@ -20,6 +20,7 @@ class SilentPlayer implements AudioPlayer {
   previewNote() {}
   noteOn() {}
   noteOff() {}
+  setSustain() {}
   setMuted() {}
   setVolume() {}
 }

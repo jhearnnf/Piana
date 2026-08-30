@@ -3,12 +3,22 @@ import { parseMidi } from "../midi/parseMidi.ts";
 import { PianoRenderer } from "../render/PianoRenderer.ts";
 import { visibleRange, type Zoom } from "../render/visibleRange.ts";
 import { ComputerKeyboardInput } from "../input/ComputerKeyboardInput.ts";
+import { isTyping } from "../input/typing.ts";
 import { PointerInput } from "../input/PointerInput.ts";
 import { MidiInput } from "../input/MidiInput.ts";
 import type { MidiState, MidiStatus } from "../input/midiDevices.ts";
 import type { NoteInputHandler } from "../input/InputSource.ts";
 import { Conductor } from "../game/Conductor.ts";
-import { PianoAudioPlayer } from "../audio/Player.ts";
+import { PianoAudioPlayer, type InstrumentSource } from "../audio/Player.ts";
+import type { LoadProgress } from "../audio/SampleEngine.ts";
+import { loadUses, recordUse, saveUses, type InstrumentUse } from "../audio/instrumentUse.ts";
+import {
+  showInstruments,
+  MAX_LAYERS,
+  type ChosenInstrument,
+  type InstrumentsScreen,
+  type InstrumentsView,
+} from "./instrumentsScreen.ts";
 import { AutoPlayer } from "../game/AutoPlayer.ts";
 import { SongPreview } from "../game/SongPreview.ts";
 import { GameSession } from "../game/GameSession.ts";
@@ -62,14 +72,21 @@ import { showScores } from "./scoresScreen.ts";
 import { showTracks } from "./tracksScreen.ts";
 import { showLibrary, type LibraryView } from "./libraryScreen.ts";
 import { buildLibrary, songTitle } from "../song/library.ts";
-import { desktop, type PianaDesktop, type SongFolder } from "../desktop.ts";
 import {
+  desktop,
+  type InstrumentFolder,
+  type PianaDesktop,
+  type SongFolder,
+} from "../desktop.ts";
+import {
+  loadInstruments,
   loadMidiDevice,
   loadMuted,
   loadVolume,
   loadWaitMode,
   loadZoom,
   loadTimelineHeight,
+  saveInstruments,
   saveMidiDevice,
   saveMuted,
   saveTimelineHeight,
@@ -98,28 +115,6 @@ const MAX_PREVIEWS_KEPT = 24;
 /** How far an arrow key moves the playhead along the timeline, in seconds. Shift goes further. */
 const KEY_SEEK_STEP = 2;
 const KEY_SEEK_COARSE = 15;
-
-/** The `<input>` types that letters actually go into, as against sliders and tick boxes. */
-const TEXT_ENTRY = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
-
-/**
- * Is this element one that letters go into?
- *
- * Two boxes on the app take typing — the one that names a loop and the one that searches
- * the song list — and every keyboard shortcut has to keep out of both, since `[` and the
- * space bar are perfectly good characters to put in a name. Asked of the element rather
- * than of those two boxes, because the next box will want the same answer.
- *
- * Deliberately narrow: a slider, a tick box and a dropdown are all things the focus can
- * land on and none of them is a place you are writing, so a shortcut pressed over one of
- * them is a shortcut, not a keystroke.
- */
-function isTyping(element: Element | null): boolean {
-  if (!(element instanceof HTMLElement)) return false;
-  if (element.isContentEditable) return true;
-  if (element instanceof HTMLTextAreaElement) return true;
-  return element instanceof HTMLInputElement && TEXT_ENTRY.has(element.type);
-}
 
 /** A name of the user's, in the quotes a tooltip says it in. */
 function quoted(name: string): string {
@@ -233,6 +228,13 @@ const TEMPLATE = `
         <option value="">All devices</option>
       </select>
     </label>
+
+    <label class="setting" id="instrument-row" hidden>
+      <span class="setting-label">Sound</span>
+      <button id="instrument" type="button" class="instrument-btn"
+              title="Choose the instruments to play through">Built-in piano</button>
+      <span id="instrument-status" class="setting-note" hidden></span>
+    </label>
     </div>
   </div>
 
@@ -285,6 +287,15 @@ const TEMPLATE = `
 `;
 
 /**
+ * How often a stretch of playing is banked to storage, in milliseconds.
+ *
+ * Ten seconds: rare enough that an hour of practice is a few hundred small writes rather
+ * than one per frame, and short enough that a crash costs a moment of one instrument's
+ * tally. An ordinary quit loses nothing at all — see `saveInstrumentUses`.
+ */
+const USE_SAVE_INTERVAL_MS = 10_000;
+
+/**
  * Top-level app controller. Owns the shared game objects (renderer, conductor, audio,
  * session) and the user-facing state (song, difficulty, hand, wait, section), and wires the
  * controls to them. Keeping this in one place means `main.ts` is just a bootstrap and each
@@ -318,6 +329,27 @@ export class App {
   private loop = false;
   private zoom: Zoom = "auto";
   private muted = false;
+  /** The instruments asked for, and how loud each sits. Empty is the built-in piano. */
+  private chosenInstruments: ChosenInstrument[] = [];
+  /** The sample library as last listed. */
+  private instrumentFolder: InstrumentFolder = { folder: null, names: [] };
+  /** How far each instrument still loading has got, by name. Empty once they are all in. */
+  private instrumentLoading: Record<string, string> = {};
+  /** The sound picker, while it is open, so loading progress can be pushed into it. */
+  private instrumentScreen: InstrumentsScreen | null = null;
+  /** Time spent playing each instrument, most first. See `creditInstruments`. */
+  private instrumentUses: InstrumentUse[] = loadUses();
+  /**
+   * When the current stretch of playing began, or null if nothing is sounding.
+   *
+   * What is being timed is notes, not selection: a song running or keys under your hands.
+   * An instrument left chosen overnight should not out-rank one you played for an hour.
+   */
+  private soundingSince: number | null = null;
+  /** Wall clock of the last write, so a long session is not a write a frame. */
+  private usesSavedAt = 0;
+  /** Whether anything has been played since that write. See `saveInstrumentUses`. */
+  private usesUnsaved = false;
   private range: TimeRange | null = null;
   private sectionId = "full";
   /**
@@ -391,6 +423,9 @@ export class App {
       songMeta: root.querySelector("#song-meta")!,
       midiDevice: root.querySelector("#midi-device")!,
       midiDeviceRow: root.querySelector("#midi-device-row")!,
+      instrument: root.querySelector("#instrument")!,
+      instrumentRow: root.querySelector("#instrument-row")!,
+      instrumentStatus: root.querySelector("#instrument-status")!,
       midiStatus: root.querySelector("#midi-status")!,
       progress: root.querySelector("#progress")!,
       progressScope: root.querySelector("#progress-scope")!,
@@ -425,6 +460,14 @@ export class App {
     this.wireDropTarget(root);
     this.wireDesktop(root);
 
+    // The last stretch of playing is still on the clock when the window goes, and the
+    // interval that rations writes may not have come round. `pagehide` rather than
+    // `beforeunload`, which a background-throttled window is not guaranteed to get.
+    window.addEventListener("pagehide", () => {
+      this.creditInstruments();
+      this.saveInstrumentUses();
+    });
+
     new ResizeObserver(() => this.renderer.resize()).observe(canvas.parentElement!);
     new ResizeObserver(() => this.timeline.resize()).observe(timelineCanvas.parentElement!);
     requestAnimationFrame(this.frame);
@@ -444,6 +487,9 @@ export class App {
         this.pressed.delete(midi);
         this.audio.noteOff(midi);
       },
+      // Straight through. The pedal changes how long a note rings and nothing else — it is
+      // not a hit, so scoring never hears about it, and no key lights up on the stage.
+      sustain: (down) => this.audio.setSustain(down),
     };
     new ComputerKeyboardInput().connect(handler);
     new PointerInput(canvas, this.renderer).connect(handler);
@@ -1321,6 +1367,8 @@ export class App {
     this.el.library!.addEventListener("click", () => void this.openLibrary(shell));
     shell.onShowSongs(() => void this.openLibrary(shell)); // File ▸ Songs… (Ctrl+L)
 
+    void this.wireInstruments(shell);
+
     const picker = root.querySelector<HTMLElement>(".file-btn");
     if (!picker) return;
 
@@ -1329,6 +1377,271 @@ export class App {
     button.textContent = "📄 Open…";
     button.addEventListener("click", () => void shell.pickSong());
     picker.replaceWith(button);
+  }
+
+  /**
+   * The sampled-instrument picker.
+   *
+   * Desktop only, and hidden entirely in the browser build, because a sample library is a
+   * folder on a disk and a tab has no folder to read. Same reasoning as the Songs button
+   * above: a control that was always there and only worked in one of the two builds would
+   * be worse than one that is honest about which build it belongs to.
+   *
+   * The sounds that were playing last time are picked up here and start loading before
+   * anything is played, which is the point of remembering them. Nothing waits on that: the
+   * synthesised piano is already answering the keyboard, and notes cross over to their
+   * recordings as they arrive.
+   */
+  private async wireInstruments(shell: PianaDesktop): Promise<void> {
+    this.el.instrumentRow!.hidden = false;
+    this.el.instrument!.addEventListener("click", () => this.openInstruments(shell));
+
+    const wanted = loadInstruments();
+    this.instrumentFolder = await shell.listInstruments();
+
+    // Only the ones still there. A library that has been moved or renamed since should
+    // leave the app on its own piano rather than on sounds it cannot find.
+    this.chosenInstruments = wanted.filter((chosen) =>
+      this.instrumentFolder.names.includes(chosen.name),
+    );
+    this.updateInstrumentButton();
+    if (this.chosenInstruments.length > 0) await this.applyInstruments(shell);
+  }
+
+  /**
+   * Open the sound picker.
+   *
+   * The only screen that does *not* pause what is playing. A blend is set by ear against
+   * music, and the other screens pause because a run left going behind an overlay quietly
+   * racks up misses — but here the run is the thing being listened to, not interrupted.
+   */
+  private openInstruments(shell: PianaDesktop): void {
+    this.instrumentScreen?.dispose();
+    this.instrumentScreen = showInstruments(this.instrumentsView(), {
+      onToggle: (name, on) => void this.toggleInstrument(shell, name, on),
+      onLevel: (name, level) => this.setInstrumentLevel(name, level),
+      onChooseFolder: async () => {
+        this.instrumentFolder = await shell.chooseInstrumentFolder();
+
+        // The new folder may not have what was playing out of the old one.
+        const kept = this.chosenInstruments.filter((chosen) =>
+          this.instrumentFolder.names.includes(chosen.name),
+        );
+        if (kept.length !== this.chosenInstruments.length) {
+          this.chosenInstruments = kept;
+          saveInstruments(kept);
+          await this.applyInstruments(shell);
+        }
+        return this.instrumentsView();
+      },
+      onClose: () => {
+        this.instrumentScreen = null;
+      },
+    });
+  }
+
+  /** Everything the picker needs to draw itself, assembled from what the app knows. */
+  private instrumentsView(): InstrumentsView {
+    return {
+      folder: this.instrumentFolder.folder,
+      names: this.instrumentFolder.names,
+      ...(this.instrumentFolder.error === undefined
+        ? {}
+        : { error: this.instrumentFolder.error }),
+      chosen: this.chosenInstruments,
+      uses: this.instrumentUses,
+      loading: this.instrumentLoading,
+    };
+  }
+
+  /** Push the app's state into the picker, if it is open. */
+  private refreshInstruments(): void {
+    this.updateInstrumentButton();
+    this.instrumentScreen?.update(this.instrumentsView());
+  }
+
+  /**
+   * Turn one instrument on or off.
+   *
+   * A new one joins at the end and at full level, which is what "add this sound" means:
+   * quieter than the rest would be a blend nobody asked for, and silent would look like it
+   * had failed to load.
+   */
+  private async toggleInstrument(shell: PianaDesktop, name: string, on: boolean): Promise<void> {
+    const already = this.chosenInstruments.some((chosen) => chosen.name === name);
+    if (on === already) return;
+    if (on && this.chosenInstruments.length >= MAX_LAYERS) return;
+
+    // Whatever was playing has been playing until this moment, and is owed that time.
+    this.creditInstruments();
+    this.chosenInstruments = on
+      ? [...this.chosenInstruments, { name, level: 1 }]
+      : this.chosenInstruments.filter((chosen) => chosen.name !== name);
+    delete this.instrumentLoading[name];
+
+    saveInstruments(this.chosenInstruments);
+    this.saveInstrumentUses(); // the stack just changed; bank what the old one earned
+    this.refreshInstruments();
+    await this.applyInstruments(shell);
+  }
+
+  /**
+   * Move one instrument's level.
+   *
+   * Straight through to the player, which reaches the notes already sounding: the point of
+   * a blend is that you hear it move. Saved with the rest of the stack, because a balance
+   * that took a minute to find is not one to make anyone find twice.
+   */
+  private setInstrumentLevel(name: string, level: number): void {
+    const chosen = this.chosenInstruments.find((entry) => entry.name === name);
+    if (!chosen) return;
+    chosen.level = level;
+    this.audio.setInstrumentLevel(name, level);
+    saveInstruments(this.chosenInstruments);
+  }
+
+  /**
+   * Hand the current stack to the player.
+   *
+   * Everything here is allowed to fail into silence-that-still-works: an instrument that
+   * cannot be read is left out and says so on its row, and the rest of the stack — or the
+   * synthesised piano, if that was all of it — carries on. The app being a piano trainer
+   * does not stop being true when one sample folder has gone missing.
+   */
+  private async applyInstruments(shell: PianaDesktop): Promise<void> {
+    const stack = [...this.chosenInstruments];
+    const sources: InstrumentSource[] = [];
+
+    // Anything the player is not already holding is about to be read off a disk, and
+    // marked as such now rather than when the first sample lands — reading the folder of
+    // a big library is itself a wait, and a row that says nothing during it looks like a
+    // click that missed.
+    const playing = new Set(this.audio.instrumentNames);
+    for (const { name } of stack) {
+      if (!playing.has(name)) this.instrumentLoading[name] = "reading…";
+    }
+    this.refreshInstruments();
+
+    for (const { name, level } of stack) {
+      const map = await shell.instrumentMap(name);
+      if (!this.sameStack(stack)) return; // ticked something else while that was read
+      if (map === null || map.samples.length === 0) {
+        this.instrumentLoading[name] = "not found";
+        continue;
+      }
+      sources.push({
+        name,
+        level,
+        samples: map.samples,
+        read: (file: string) => shell.readSample(name, file),
+        onProgress: (progress: LoadProgress) => this.showInstrumentProgress(name, progress),
+      });
+    }
+
+    this.refreshInstruments();
+    await this.audio.setInstruments(sources);
+  }
+
+  /** Is `stack` still the one that has been asked for? Names and order, not levels. */
+  private sameStack(stack: readonly ChosenInstrument[]): boolean {
+    return (
+      stack.length === this.chosenInstruments.length &&
+      stack.every((chosen, i) => this.chosenInstruments[i]?.name === chosen.name)
+    );
+  }
+
+  /**
+   * How far one instrument has got.
+   *
+   * Cleared rather than left saying "45 / 45": a count is worth showing while it is
+   * changing, and a finished one is just the row's own name restated.
+   */
+  private showInstrumentProgress(name: string, progress: LoadProgress): void {
+    if (!this.chosenInstruments.some((chosen) => chosen.name === name)) return;
+    if (progress.loaded >= progress.total) delete this.instrumentLoading[name];
+    else this.instrumentLoading[name] = `${progress.loaded} / ${progress.total}`;
+    this.refreshInstruments();
+  }
+
+  /**
+   * The Sound button, and the loading count beside it.
+   *
+   * Names the first instrument and counts the rest, because the settings row has one line
+   * for this: "Grand Piano +2" says which sound you are hearing most of, where a list of
+   * three would be cut off after the first anyway. The full stack is in the tooltip.
+   */
+  private updateInstrumentButton(): void {
+    const [first, ...rest] = this.chosenInstruments;
+    const button = this.el.instrument!;
+    button.textContent =
+      first === undefined
+        ? "Built-in piano"
+        : rest.length === 0
+          ? first.name
+          : `${first.name} +${rest.length}`;
+    button.title =
+      this.chosenInstruments.length === 0
+        ? "Choose the instruments to play through"
+        : this.chosenInstruments.map((chosen) => chosen.name).join(" · ");
+
+    const loading = Object.values(this.instrumentLoading);
+    const status = this.el.instrumentStatus!;
+    status.textContent = loading[0] ?? "";
+    status.hidden = loading.length === 0;
+  }
+
+  /**
+   * Bank the time spent playing the sounds that are on.
+   *
+   * Called whenever the answer to "is anything sounding" changes and whenever the stack
+   * does, so a stretch of playing is credited to the instruments that were actually making
+   * it. Writes are rationed: this runs off the frame loop, and a session is otherwise an
+   * hour of storage writes for a list nobody reads until the picker is opened.
+   */
+  private creditInstruments(): void {
+    const since = this.soundingSince;
+    this.soundingSince = null;
+    if (since === null) return;
+
+    const seconds = (performance.now() - since) / 1000;
+    const names = this.chosenInstruments.map((chosen) => chosen.name);
+    if (seconds < 0.25 || names.length === 0) return;
+
+    this.instrumentUses = recordUse(this.instrumentUses, names, seconds, Date.now());
+    this.usesUnsaved = true;
+    if (performance.now() - this.usesSavedAt >= USE_SAVE_INTERVAL_MS) this.saveInstrumentUses();
+  }
+
+  /**
+   * Write the times out, if there is anything new to write.
+   *
+   * Rationed by `creditInstruments` while the app is running and forced on the way out, so
+   * a session that ends inside the interval — which is every short one — still counts. The
+   * flag is what makes the forced write free when nothing has changed.
+   */
+  private saveInstrumentUses(): void {
+    if (!this.usesUnsaved) return;
+    this.usesUnsaved = false;
+    this.usesSavedAt = performance.now();
+    saveUses(this.instrumentUses);
+  }
+
+  /** Start and stop the clock on the sounds that are on. Called every frame. */
+  private trackInstrumentUse(): void {
+    const sounding = this.conductor.isPlaying() || this.pressed.size > 0;
+    const since = this.soundingSince;
+
+    if (sounding && since === null) {
+      this.soundingSince = performance.now();
+    } else if (sounding && performance.now() - since! > USE_SAVE_INTERVAL_MS) {
+      // Bank a long unbroken stretch as it goes, so an app closed mid-song does not lose
+      // all of it. Crediting resets the clock, so this picks straight back up.
+      this.creditInstruments();
+      this.soundingSince = performance.now();
+    } else if (!sounding && since !== null) {
+      this.creditInstruments();
+      this.refreshInstruments(); // the times in the picker move as you play
+    }
   }
 
   /**
@@ -1700,6 +2013,7 @@ export class App {
 
     if (this.wasPlaying !== this.conductor.isPlaying()) this.updatePlayButton();
     this.wasPlaying = this.conductor.isPlaying();
+    this.trackInstrumentUse();
 
     requestAnimationFrame(this.frame);
   };

@@ -21,8 +21,11 @@ const path = require('path');
 const fs = require('fs');
 const { parseState, restoreState, MIN_SIZE } = require('./window-state.cjs');
 const { resolveAsset } = require('./serve.cjs');
-const { parsePrefs, songFolder, startFolder } = require('./prefs.cjs');
+const { parsePrefs, songFolder, instrumentFolder, startFolder } = require('./prefs.cjs');
 const { listMidiNames, resolveInFolder } = require('./library.cjs');
+const {
+  buildSampleMap, listInstrumentNames, resolveInstrument, resolveSample,
+} = require('./instruments.cjs');
 const { menuTemplate } = require('./menu.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -310,6 +313,85 @@ function songArg(argv) {
   return argv.slice(1).find(looksLikeMidi) || null;
 }
 
+// ------------------------------------------------------------- instruments
+
+/**
+ * Sampled instruments, read out of a folder the user points us at.
+ *
+ * The app's own piano is synthesised and always there; this is how it plays through
+ * recordings of a real one instead. Nothing is bundled and nothing is copied: a sample
+ * library is somebody's licensed property sitting in their own Documents folder, and the
+ * only defensible thing to do with it is read it where it lies, on this machine, for the
+ * person who installed it.
+ *
+ * Three questions, because loading an instrument is not one operation: what sounds are
+ * there, which notes does this sound have, and give me that note. The last is per-file and
+ * gets asked ninety times, so the renderer can start playing the middle of the keyboard
+ * while the ends are still arriving rather than waiting on a single 130 MB reply.
+ */
+
+/** The instruments in the sample library folder: `{ folder, names, error? }`. */
+async function listInstruments() {
+  const folder = instrumentFolder(loadPrefs());
+  if (!folder) return { folder: null, names: [] };
+  try {
+    const entries = await fs.promises.readdir(folder, { withFileTypes: true });
+    const named = entries.map((e) => ({ name: e.name, directory: e.isDirectory() }));
+    return { folder, names: listInstrumentNames(named) };
+  } catch (err) {
+    return { folder, names: [], error: err.message };
+  }
+}
+
+/** Ask for the sample library folder, remember it, and answer with what is in it. */
+async function chooseInstrumentFolder() {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Choose your sample library folder',
+    message: 'Pick the folder that holds one sub-folder per instrument.',
+    properties: ['openDirectory'],
+    defaultPath: startFolder(
+      { songFolder: instrumentFolder(loadPrefs()) },
+      (p) => fs.existsSync(p),
+      app.getPath('documents'),
+    ),
+  });
+  if (!res.canceled && res.filePaths.length) {
+    savePrefs({ ...(loadPrefs() ?? {}), instrumentFolder: res.filePaths[0] });
+  }
+  return listInstruments();
+}
+
+/**
+ * Which notes an instrument has recordings of, as `{ instrument, samples }`.
+ *
+ * Names only, no bytes — this is the map the renderer plans its loading from, and it has
+ * to arrive quickly enough that choosing a sound feels like choosing rather than loading.
+ */
+async function readInstrumentMap(instrument) {
+  const folder = instrumentFolder(loadPrefs());
+  const dir = folder === null ? null : resolveInstrument(folder, instrument);
+  if (dir === null) return null;
+  try {
+    const names = await fs.promises.readdir(dir);
+    return { instrument, samples: buildSampleMap(names) };
+  } catch {
+    return null;
+  }
+}
+
+/** One sample's bytes, or null. Unreadable files are a gap in the keyboard, not an error. */
+async function readSample(instrument, file) {
+  const folder = instrumentFolder(loadPrefs());
+  const target = folder === null ? null : resolveSample(folder, instrument, file);
+  if (target === null) return null;
+  try {
+    const buf = await fs.promises.readFile(target);
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  } catch {
+    return null;
+  }
+}
+
 // -------------------------------------------------------------------- menu
 
 function showAbout() {
@@ -524,3 +606,7 @@ ipcMain.handle('songs:list', () => listSongFolder());
 ipcMain.handle('songs:folder', () => chooseSongFolder());
 ipcMain.handle('songs:open', (_event, name) => openSongFromFolder(name));
 ipcMain.handle('songs:read', (_event, name) => readSongFromFolder(name));
+ipcMain.handle('instruments:list', () => listInstruments());
+ipcMain.handle('instruments:folder', () => chooseInstrumentFolder());
+ipcMain.handle('instruments:map', (_event, name) => readInstrumentMap(name));
+ipcMain.handle('instruments:sample', (_event, name, file) => readSample(name, file));

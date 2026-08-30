@@ -1,8 +1,6 @@
 import type { InputSource, NoteInputHandler } from "./InputSource.ts";
 import { chooseInputs, connectionStatus, deviceNames, type MidiState } from "./midiDevices.ts";
-
-const NOTE_ON = 0x90;
-const NOTE_OFF = 0x80;
+import { decodeMidiMessage } from "./midiMessage.ts";
 
 /**
  * Real USB MIDI keyboard input via the Web MIDI API (Chrome / Edge).
@@ -89,16 +87,12 @@ export class MidiInput implements InputSource {
   private onStateChange = (): void => this.attachInputs();
 
   private onMessage = (event: MIDIMessageEvent): void => {
-    const data = event.data;
-    if (!data || data.length < 3 || !this.handler) return;
-    const command = data[0]! & 0xf0;
-    const note = data[1]!;
-    const velocity = data[2]!;
+    if (!event.data || !this.handler) return;
+    const action = decodeMidiMessage(event.data);
+    if (action === null) return;
 
-    if (command === NOTE_ON && velocity > 0) {
-      this.handler.noteOn(note, velocity / 127);
-    } else if (command === NOTE_OFF || (command === NOTE_ON && velocity === 0)) {
-      this.handler.noteOff(note);
-    }
+    if (action.kind === "noteOn") this.handler.noteOn(action.midi, action.velocity);
+    else if (action.kind === "noteOff") this.handler.noteOff(action.midi);
+    else this.handler.sustain(action.down);
   };
 }

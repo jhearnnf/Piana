@@ -10,6 +10,14 @@ import {
   velocityGain,
   volumeToGain,
 } from "./piano.ts";
+import {
+  loadSamples,
+  SampleEngine,
+  type LoadProgress,
+  type SampleReader,
+  type StruckVoice,
+} from "./SampleEngine.ts";
+import { loadOrder, thinToBudget, type SampleRef } from "./sampleMap.ts";
 
 /**
  * Sound output, behind a small interface so it can be swapped (a sampled piano, a
@@ -33,20 +41,61 @@ export interface AudioPlayer {
   /** Sustained press (used to echo the player's own key presses). */
   noteOn(midi: number, velocity: number): void;
   noteOff(midi: number): void;
+  /**
+   * The sustain pedal went down, or came up.
+   *
+   * Down, a released key goes on ringing until the pedal comes up. It is the third thing
+   * your hands and feet do to a piano, and without it a played line is a series of
+   * separate notes rather than music.
+   */
+  setSustain(down: boolean): void;
   /** Silence the song the app is playing, without changing what it is doing. */
   setMuted(muted: boolean): void;
   /** Output level, 0 (silent) to 1 (full). */
   setVolume(level: number): void;
 }
 
-/** One sounding note: its partials, and the damper that will stop them. */
+/** One sounding note: whatever is making it, and the damper that will stop it. */
 interface Voice {
   midi: number;
   /** The damper. Every part of the note runs through here, so releasing this stops it. */
   gain: GainNode;
-  oscillators: OscillatorNode[];
+  /** Oscillators for a synthesised note, one buffer per layer for a sampled one. */
+  sources: AudioScheduledSourceNode[];
+  /**
+   * The layers sounding in this note, each with the gain carrying its share.
+   *
+   * Kept so that moving a blend slider reaches the chord under your hands rather than only
+   * the next note — which is the difference between a blend you can set by ear and one you
+   * have to guess at and re-strike to hear.
+   */
+  parts: { instrument: string; blend: GainNode }[];
   startedAt: number;
   released: boolean;
+}
+
+/** One instrument in the stack: its recordings, and how loud it sits in the blend. */
+interface Layer {
+  name: string;
+  engine: SampleEngine;
+  level: number;
+  /** False while it is still loading, so a re-selection knows not to keep it as it is. */
+  complete: boolean;
+}
+
+/**
+ * An instrument to play through, and where to get it.
+ *
+ * The samples are named, not supplied: they are read one at a time, in the background,
+ * while the app carries on making sound. See `setInstruments`.
+ */
+export interface InstrumentSource {
+  name: string;
+  samples: readonly SampleRef[];
+  read: SampleReader;
+  /** Its share of the sound, 0..1. Full when not given. */
+  level?: number;
+  onProgress?: (progress: LoadProgress) => void;
 }
 
 /** Above this many notes at once, the oldest is taken to make room. */
@@ -67,6 +116,13 @@ const NYQUIST_MARGIN = 0.45;
  *
  * Nothing is downloaded — the app stays usable offline, and there is no first-note delay
  * waiting on a sample pack.
+ *
+ * That synthesised piano is also the floor rather than the ceiling. Given a sampled
+ * instrument (`setInstrument`) each note is played from its recording instead, and the
+ * synth quietly covers whatever the recordings do not: a note still loading, a gap in the
+ * library, the whole keyboard when no instrument is chosen. Only the voice changes — the
+ * room, the compressor, the mute, the volume and the voice stealing are the same either
+ * way, so an instrument is a change of sound and not a change of app.
  */
 export class PianoAudioPlayer implements AudioPlayer {
   private ctx: AudioContext | null = null;
@@ -89,6 +145,26 @@ export class PianoAudioPlayer implements AudioPlayer {
   private readonly voices: Voice[] = [];
   /** Notes currently held down, so `noteOff` knows which voice to damp. */
   private readonly held = new Map<number, Voice>();
+  /**
+   * Notes whose keys have come up but which the pedal is still holding.
+   *
+   * A set rather than a map by pitch: with the pedal down, playing the same note twice
+   * leaves two strings ringing, which is what a real piano does and what makes a repeated
+   * note under the pedal thicken rather than restart.
+   */
+  private readonly sustained = new Set<Voice>();
+  private sustainDown = false;
+
+  /**
+   * The instruments being played, in the order they were chosen.
+   *
+   * Empty — the usual case — means the synthesised piano does all of the work. More than
+   * one means they sound together, which is what a sampled library is *for*: a piano with
+   * a little of a pad under it is a sound neither of them is on its own.
+   */
+  private readonly layers: Layer[] = [];
+  /** Bumped by every change to the stack, so a load still running knows it was replaced. */
+  private instrumentToken = 0;
 
   private muted = false;
   private volume = 1;
@@ -112,10 +188,134 @@ export class PianoAudioPlayer implements AudioPlayer {
     }
   }
 
+  /**
+   * Raise or drop every damper on the instrument.
+   *
+   * Down does nothing on its own — it is a promise about what happens at the *next*
+   * note-off, which is where a pedal actually lives. Up is where the work is: everything
+   * the pedal has been holding is let go at once, which is the sound of the pedal.
+   *
+   * What it holds is what you played. The auto-played accompaniment is not pedalled, even
+   * though a real pedal would hold it too: those notes have durations that came out of the
+   * file, and smearing the part you are playing along to would make it harder to hear
+   * against — which is the one thing it is there for.
+   */
+  setSustain(down: boolean): void {
+    if (down === this.sustainDown) return;
+    this.sustainDown = down;
+    if (down || !this.ctx) return;
+
+    const now = this.ctx.currentTime;
+    for (const voice of this.sustained) this.release(voice, now);
+    this.sustained.clear();
+  }
+
   setVolume(level: number): void {
     this.volume = level;
     if (this.volumeGain && this.ctx) {
       this.volumeGain.gain.setTargetAtTime(volumeToGain(level), this.ctx.currentTime, 0.02);
+    }
+  }
+
+  /** The instruments playing, in blend order. Empty means the built-in piano. */
+  get instrumentNames(): string[] {
+    return this.layers.map((layer) => layer.name);
+  }
+
+  /**
+   * Play through these instruments, together. An empty list is the synthesised piano.
+   *
+   * Resolves when the last recording has been decoded, but the stack is playable long
+   * before that: notes swap over to their recordings one at a time as they arrive, middle
+   * of the keyboard first, and until then the synth has them. So there is nothing to wait
+   * for and nothing to block — the return value is for anything that wants to *say* when
+   * loading finished, not for anything that needs to.
+   *
+   * An instrument that is already loaded and still wanted is kept exactly as it is. That
+   * is what makes adding a third sound to two you are listening to a change to the sound
+   * rather than an interruption of it — the two you had go on playing throughout.
+   *
+   * Changing the stack mid-load abandons the old load rather than queueing behind it: the
+   * token is bumped first, which is what every step of a load in flight is checking. Notes
+   * already sounding are left alone. They are the ones you just played, and cutting them
+   * off to change a setting would be the loudest thing the setting ever did.
+   */
+  async setInstruments(sources: readonly InstrumentSource[]): Promise<void> {
+    const token = ++this.instrumentToken;
+
+    // Anything finished and still wanted survives; everything else gives its memory back.
+    const wanted = new Set(sources.map((source) => source.name));
+    const keep = new Map<string, Layer>();
+    for (const layer of this.layers) {
+      if (layer.complete && wanted.has(layer.name)) keep.set(layer.name, layer);
+      else layer.engine.clear();
+    }
+
+    this.layers.length = 0;
+    for (const source of sources) {
+      const layer = keep.get(source.name) ?? {
+        name: source.name,
+        engine: new SampleEngine(),
+        level: 1,
+        complete: false,
+      };
+      // The level comes from the request either way: a blend is a property of the stack
+      // being asked for, not of the samples that happen to be in memory already.
+      layer.level = source.level ?? 1;
+      this.layers.push(layer);
+    }
+    if (sources.length === 0) return;
+
+    // Choosing a sound is itself a user gesture, so this is a fine place to open the
+    // audio context — and there has to be one, because decoding needs it. Failing to
+    // *start* it is not a reason to stop: instruments restored at launch are asked for
+    // before anything has been played, so the context is still waiting on a gesture, and
+    // decoding into a suspended context is exactly what wants to happen there.
+    try {
+      await this.ensureStarted();
+    } catch {
+      /* still not running — the samples can be got ready regardless */
+    }
+    const ctx = this.ctx;
+    if (!ctx || token !== this.instrumentToken) return;
+
+    // One instrument at a time. Two libraries decoding at once would hold both lots of
+    // untrimmed audio at the same moment, which is the peak that matters.
+    for (const [index, source] of sources.entries()) {
+      const layer = this.layers[index];
+      if (!layer || layer.complete) continue;
+
+      const samples = thinToBudget(source.samples);
+      layer.engine.setSamples(source.name, samples);
+      await loadSamples(ctx, layer.engine, loadOrder(samples), source.read, {
+        cancelled: () => token !== this.instrumentToken,
+        onProgress: source.onProgress,
+      });
+      if (token !== this.instrumentToken) return;
+      layer.complete = true;
+    }
+  }
+
+  /**
+   * How loud one instrument sits in the blend, 0..1.
+   *
+   * Reaches the notes already sounding as well as the next one, ramped rather than
+   * switched — a blend is set by ear, over a chord you are holding or a song that is
+   * playing, and a slider that only took effect on the following note would be impossible
+   * to aim. Unknown names are ignored: the stack may have changed under a slider that was
+   * still on screen.
+   */
+  setInstrumentLevel(name: string, level: number): void {
+    const layer = this.layers.find((candidate) => candidate.name === name);
+    if (!layer) return;
+    layer.level = level;
+    if (!this.ctx) return;
+
+    const now = this.ctx.currentTime;
+    for (const voice of this.voices) {
+      for (const part of voice.parts) {
+        if (part.instrument === name) part.blend.gain.setTargetAtTime(level, now, 0.02);
+      }
     }
   }
 
@@ -207,15 +407,21 @@ export class PianoAudioPlayer implements AudioPlayer {
     const voice = this.held.get(midi);
     if (!voice || !this.ctx) return;
     this.held.delete(midi);
-    this.release(voice, this.ctx.currentTime);
+
+    // The key is up either way — what the pedal decides is whether the damper follows it
+    // down. Moved out of `held` regardless, so pressing the key again starts a new string
+    // rather than finding this one and cutting it short.
+    if (this.sustainDown) this.sustained.add(voice);
+    else this.release(voice, this.ctx.currentTime);
   }
 
   /**
-   * Strike one string: a stack of decaying partials plus the hammer's own noise.
+   * Start one note, however this player is currently making them.
    *
-   * The partials are level-normalised against their own sum. They all start in phase, so
-   * without that a bright note would peak at several times the level of a mellow one for
-   * the same velocity, and the compressor would spend its life undoing it.
+   * The damper is built here and the sound is built into it, because the damper is the
+   * part that has to work the same for both: a key release, a duration running out and a
+   * voice being stolen all mean "stop that note", and none of them should have to know
+   * whether the note is an oscillator stack or a recording.
    */
   private startVoice(midi: number, velocity: number, destination: GainNode | null): Voice | null {
     const ctx = this.ctx;
@@ -231,6 +437,63 @@ export class PianoAudioPlayer implements AudioPlayer {
     if (this.voices.length >= MAX_VOICES) this.stealOldest();
 
     const t0 = ctx.currentTime;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    gain.connect(destination);
+
+    // Every chosen instrument that has this note, all into the same damper. They sound
+    // together — that is what layering is — and share one release, because they are one
+    // note however many recordings went into it.
+    const sources: AudioScheduledSourceNode[] = [];
+    const parts: Voice["parts"] = [];
+    let tail = 0;
+    for (const layer of this.layers) {
+      const struck = layer.engine.strike(ctx, gain, midi, velocity, t0, layer.level);
+      if (!struck) continue;
+      sources.push(...struck.sources);
+      if (struck.blend) parts.push({ instrument: layer.name, blend: struck.blend });
+      tail = Math.max(tail, struck.tail);
+    }
+
+    // Nothing had it: no instrument chosen, or none of them has reached this note yet.
+    // The synth covers it — which is per note rather than per instrument, and is what
+    // lets a library load in the background instead of behind a silent keyboard. Only
+    // when *nothing* sounded, so a stack that is half loaded is quiet in the right
+    // places rather than doubled in them.
+    if (sources.length === 0) {
+      const synth = this.synthVoice(ctx, gain, midi, velocity, t0);
+      if (!synth) {
+        gain.disconnect();
+        return null;
+      }
+      sources.push(...synth.sources);
+      tail = synth.tail;
+    }
+
+    const voice: Voice = { midi, gain, sources, parts, startedAt: t0, released: false };
+    // A backstop only: every voice is damped by a key release or by its own duration long
+    // before this. It exists so a dropped note-off cannot leave a voice running for the
+    // life of the app.
+    this.stopAt(voice, t0 + Math.min(30, tail + 1));
+    this.voices.push(voice);
+    return voice;
+  }
+
+  /**
+   * Strike one string: a stack of decaying partials plus the hammer's own noise.
+   *
+   * The partials are level-normalised against their own sum. They all start in phase, so
+   * without that a bright note would peak at several times the level of a mellow one for
+   * the same velocity, and the compressor would spend its life undoing it.
+   */
+  private synthVoice(
+    ctx: AudioContext,
+    gain: GainNode,
+    midi: number,
+    velocity: number,
+    t0: number,
+  ): StruckVoice | null {
     const attack = attackTime(midi);
     const level = velocityGain(velocity);
     const fundamental = midiToFreq(midi);
@@ -259,11 +522,7 @@ export class PianoAudioPlayer implements AudioPlayer {
     }
     if (partials.length === 0) return null;
 
-    const gain = ctx.createGain();
-    gain.gain.value = 1;
-    gain.connect(destination);
-
-    const oscillators: OscillatorNode[] = [];
+    const sources: AudioScheduledSourceNode[] = [];
     let longest = 0;
     for (const partial of partials) {
       const osc = ctx.createOscillator();
@@ -279,19 +538,15 @@ export class PianoAudioPlayer implements AudioPlayer {
       osc.connect(env);
       env.connect(gain);
       osc.start(t0);
-      oscillators.push(osc);
+      sources.push(osc);
       longest = Math.max(longest, partial.tau);
     }
 
     this.strikeNoise(ctx, gain, t0, midi, level * velocity);
 
-    const voice: Voice = { midi, gain, oscillators, startedAt: t0, released: false };
-    // A backstop only: every voice is damped by a key release or by its own duration long
-    // before this. It exists so a dropped note-off cannot leave oscillators running for
-    // the life of the app.
-    this.stopAt(voice, t0 + Math.min(30, longest * 6 + 1));
-    this.voices.push(voice);
-    return voice;
+    // Six time constants down is a thousandth of the starting level: gone, by any measure
+    // that matters, and the point past which the voice is only costing oscillators.
+    return { sources, tail: longest * 6 };
   }
 
   /**
@@ -336,6 +591,9 @@ export class PianoAudioPlayer implements AudioPlayer {
   private release(voice: Voice, when: number, tau = damperTime(voice.midi)): void {
     if (voice.released) return;
     voice.released = true;
+    // However it came to be released — the pedal, a stolen voice, a duration running out —
+    // it is not the pedal's to let go of any more.
+    this.sustained.delete(voice);
 
     const param = voice.gain.gain;
     param.cancelScheduledValues(when);
@@ -346,17 +604,17 @@ export class PianoAudioPlayer implements AudioPlayer {
 
   /** Stop and unhook a voice at `when`, replacing any later stop already scheduled. */
   private stopAt(voice: Voice, when: number): void {
-    for (const osc of voice.oscillators) {
+    for (const source of voice.sources) {
       try {
-        osc.stop(when);
+        source.stop(when);
       } catch {
         /* already stopped — nothing to bring forward */
       }
     }
-    // Every oscillator in the voice stops together, so one of them ending is the note being
-    // over and the nodes being safe to release. (A voice is never built without partials,
-    // so the check is for the compiler rather than for a case that happens.)
-    const first = voice.oscillators[0];
+    // Every source in the voice stops together, so one of them ending is the note being
+    // over and the nodes being safe to release. (A voice is never built without one, so
+    // the check is for the compiler rather than for a case that happens.)
+    const first = voice.sources[0];
     if (!first) return;
     first.onended = () => {
       voice.gain.disconnect();

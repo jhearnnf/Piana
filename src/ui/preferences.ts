@@ -1,4 +1,5 @@
 import type { Zoom } from "../render/visibleRange.ts";
+import type { ChosenInstrument } from "./instrumentsScreen.ts";
 import {
   DEFAULT_TIMELINE_HEIGHT,
   MAX_TIMELINE_HEIGHT,
@@ -8,8 +9,8 @@ import {
 /**
  * Settings that outlive a session.
  *
- * The keyboard zoom, the timeline height, the volume and mute switch, wait mode, and which
- * MIDI device to listen to — and not the rest. Difficulty, hand and section are choices
+ * The keyboard zoom, the timeline height, the volume and mute switch, wait mode, which
+ * MIDI device to listen to, and which instrument to play through — and not the rest. Difficulty, hand and section are choices
  * about *this* song,
  * but "show me all 88 keys", "this loud", "don't make noise", "hold until I play the note"
  * and "the piano, not the fader box" are statements about how you like to use the app, and
@@ -21,6 +22,7 @@ const MUTED_KEY = "piana:muted";
 const VOLUME_KEY = "piana:volume";
 const WAIT_KEY = "piana:wait";
 const MIDI_DEVICE_KEY = "piana:midi-device";
+const INSTRUMENT_KEY = "piana:instrument";
 const TIMELINE_KEY = "piana:timeline-height";
 
 /** Where the slider sits before anyone has moved it: loud enough to hear, short of full. */
@@ -192,6 +194,57 @@ export function loadMidiDevice(): string | null {
 export function saveMidiDevice(name: string | null): void {
   try {
     localStorage.setItem(MIDI_DEVICE_KEY, name ?? "");
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
+/**
+ * Which sampled instruments to play through, and how loud each sits. Empty is the
+ * built-in piano.
+ *
+ * Names only, not the folder they are in: where a sample library lives is a path, and the
+ * shell keeps those (see electron/prefs.cjs). The two are stored apart because they answer
+ * different questions — "where is your library" is about this machine, "which sounds do
+ * you like" is about you — and a name whose library has moved should resolve to the same
+ * sound once the library is found again, rather than to nothing.
+ *
+ * Unknown names are not rejected here: the caller checks them against the instruments that
+ * actually exist, and this has no list to check against. Levels are clamped rather than
+ * dropped, since a stored 1.4 is plainly a request for "all of it".
+ */
+export function parseInstruments(raw: string | null): ChosenInstrument[] {
+  if (raw === null || raw.trim() === "") return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    const chosen: ChosenInstrument[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const { name, level } = entry as Record<string, unknown>;
+      if (typeof name !== "string" || name === "") continue;
+      // A level that is missing or unreadable is a sound you asked to hear, so: all of it.
+      const usable = typeof level === "number" && Number.isFinite(level) ? level : 1;
+      chosen.push({ name, level: Math.min(1, Math.max(0, usable)) });
+    }
+    return chosen;
+  } catch {
+    return [];
+  }
+}
+
+export function loadInstruments(): ChosenInstrument[] {
+  try {
+    return parseInstruments(localStorage.getItem(INSTRUMENT_KEY));
+  } catch {
+    return []; // storage unavailable — the built-in piano
+  }
+}
+
+export function saveInstruments(chosen: readonly ChosenInstrument[]): void {
+  try {
+    localStorage.setItem(INSTRUMENT_KEY, JSON.stringify(chosen));
   } catch {
     /* storage unavailable — non-fatal */
   }

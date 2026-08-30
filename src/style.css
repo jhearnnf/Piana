@@ -308,8 +308,18 @@ body {
   white-space: nowrap;
 }
 
-/* Chosen once and then forgotten about - how much piano is on screen, and which keyboard
-   to listen to. Set apart from the per-song settings by a rule rather than by being
+/* A number that is only worth reading while it is moving - how much of a sample library
+   has loaded. Sits at the size of the label rather than the control, because it is a
+   remark about the setting beside it and not another setting. */
+.setting-note {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Chosen once and then forgotten about - how much piano is on screen, which keyboard
+   to listen to, and what it should sound like. Set apart from the per-song settings by a rule rather than by being
    floated to the far end: the row wraps on a narrow window, and a right-aligned pair that
    had wrapped onto a line of its own read as an orphan rather than as a group. */
 .setting-rare {
@@ -1357,4 +1367,128 @@ body {
 
 .piana-controls button:disabled:hover {
   background: var(--panel-2);
+}
+
+/* ------------------------------------------------------- the sound picker
+
+   Same card, search box and folder line as the song list, because they are the same
+   idea twice: a folder on this machine, listed so you can pick out of it without a
+   file dialog. What is different is that several rows can be on at once, and each one
+   that is brings a level with it. */
+
+/* The Sound button in the settings row. Shaped like the selects beside it - it opens
+   a list and shows what is chosen, which is a select's job even though the list is far
+   too long and too interactive to be one. */
+.instrument-btn {
+  height: 30px;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid #000000;
+  border-radius: 8px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.instrument-heading {
+  margin: 14px 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.instrument-heading:first-child {
+  margin-top: 0;
+}
+
+.instrument-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The level column keeps its width whether or not the row is using it, so ticking a
+   sound does not shove every name on the screen sideways. */
+.instrument-row {
+  display: grid;
+  grid-template-columns: 1fr 58px 58px 150px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.instrument-row.on {
+  background: var(--panel-2);
+}
+
+.instrument-pick {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.instrument-pick input:disabled {
+  cursor: not-allowed;
+}
+
+.instrument-pick:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.instrument-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instrument-row.on .instrument-name {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* How long you have played it, and how far it has loaded. Both quiet, both tabular so
+   the column does not twitch as a count climbs. */
+.instrument-played,
+.instrument-loading {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.instrument-level {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* `display: flex` beats the hidden attribute, so say it again - the same fix the empty
+   screen needs above. Without it every row in the library wears a level it is not using. */
+.instrument-level[hidden] {
+  display: none;
+}
+
+.instrument-level input[type="range"] {
+  width: 100px;
+}
+
+.instrument-percent {
+  min-width: 34px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
