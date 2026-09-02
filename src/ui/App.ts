@@ -31,6 +31,12 @@ import {
   saveIfBest,
   type ScoreContext,
 } from "../game/highScores.ts";
+import {
+  loadLog,
+  recordAttempt,
+  saveLog,
+  type Attempt,
+} from "../game/practiceLog.ts";
 import { applyDifficulty } from "../song/difficulty.ts";
 import { applyHandModes, defaultHandModes, type HandMode } from "../song/handModes.ts";
 import { detectSections, fullSongSection, type Section } from "../song/sections.ts";
@@ -375,6 +381,14 @@ export class App {
   private activeLoopId: string | null = null;
   /** The kept loop under the pointer, lit on the map while it is there. */
   private hoverLoopId: string | null = null;
+  /**
+   * Every lap and run recorded for the song that is open, oldest first.
+   *
+   * Held here for the same reason the loops are: it is read and written a lap at a time,
+   * and re-parsing the file to append one attempt would be the whole history re-read every
+   * few seconds of practice.
+   */
+  private practiceLog: Attempt[] = [];
   /** Whether the name box is open, and whether it is naming a new loop or an old one. */
   private naming: "new" | "rename" | null = null;
   /**
@@ -399,7 +413,8 @@ export class App {
     this.renderer = new PianoRenderer(canvas);
     this.timeline = new TimelineRenderer(timelineCanvas);
     this.session = new GameSession(this.conductor, this.autoPlayer);
-    this.session.onFinish = (result) => this.handleFinish(result);
+    this.session.onFinish = (result, seconds) => this.handleFinish(result, seconds);
+    this.session.onLap = (result, seconds) => this.recordRun(result, seconds);
 
     this.el = {
       file: root.querySelector("#file")!,
@@ -1730,6 +1745,7 @@ export class App {
       // of them you want today is a choice, and a song that opened straight into last
       // night's eight bars would be answering it for you.
       this.savedLoops = loadLoops(this.baseSong.name);
+      this.practiceLog = loadLog(this.baseSong.name);
       this.hoverLoopId = null;
       this.endNaming();
       this.selectSection("full"); // a new song arrives whole, with no points marked on it
@@ -1892,17 +1908,24 @@ export class App {
   private showRunScope(song: Song): void {
     this.el.progress!.hidden = false;
 
-    // Named whenever the run is less than the whole song — a kept loop by the name you
-    // gave it, a detected section by its number, a hand-picked region by the times it
-    // runs between.
-    const saved = loopById(this.savedLoops, this.activeLoopId);
-    this.el.progressScope!.textContent =
-      this.sectionId === "full" ? ""
-      : saved ? saved.name
-      : sectionLabel(this.sectionId);
+    this.el.progressScope!.textContent = this.runLabel();
     this.el.timeTotal!.textContent = formatTime(song.durationSec);
     this.el.timeline!.setAttribute("aria-valuemax", String(Math.round(song.durationSec)));
     this.shownTime = ""; // the clock is re-read next frame against the new song
+  }
+
+  /**
+   * What the run is called, or "" when it is the whole song.
+   *
+   * Named whenever the run is less than the whole song — a kept loop by the name you gave
+   * it, a detected section by its number, a hand-picked region by the times it runs
+   * between. Written on the stage and kept with each recorded attempt, so a report calls a
+   * passage what the screen called it while you were playing it.
+   */
+  private runLabel(): string {
+    if (this.sectionId === "full") return "";
+    const saved = loopById(this.savedLoops, this.activeLoopId);
+    return saved ? saved.name : sectionLabel(this.sectionId);
   }
 
   /**
@@ -1972,7 +1995,34 @@ export class App {
     (this.el.restart as HTMLButtonElement).disabled = !ready;
   }
 
-  private handleFinish(result: import("../game/Scoring.ts").ScoreResult): void {
+  /**
+   * Write down a lap of a loop, or a run that reached its end.
+   *
+   * Every attempt is kept, not just the ones that beat something: a best score says how
+   * well you can play a passage, and this says how the playing of it went — which is the
+   * only one of the two that can show a stretch of eight bars getting faster and cleaner
+   * over a fortnight.
+   */
+  private recordRun(result: import("../game/Scoring.ts").ScoreResult, seconds: number): void {
+    const songName = this.baseSong?.name;
+    if (!songName) return;
+    this.practiceLog = recordAttempt(this.practiceLog, {
+      at: Date.now(),
+      seconds,
+      sectionId: this.sectionId,
+      label: this.runLabel(),
+      difficulty: this.difficulty,
+      hand: this.hand,
+      result,
+    });
+    saveLog(songName, this.practiceLog);
+  }
+
+  private handleFinish(
+    result: import("../game/Scoring.ts").ScoreResult,
+    seconds: number,
+  ): void {
+    this.recordRun(result, seconds);
     const ctx: ScoreContext = {
       songName: this.baseSong?.name ?? "Unknown",
       difficulty: this.difficulty,

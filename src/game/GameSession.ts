@@ -27,6 +27,14 @@ export interface SessionConfig {
 export type SessionState = "idle" | "running" | "finished";
 
 /**
+ * Longest gap between frames the lap clock will believe, in seconds.
+ *
+ * Comfortably longer than the worst frame a loaded machine produces and far shorter than
+ * the smallest interruption worth noticing. See {@link GameSession.tickLapClock}.
+ */
+const MAX_FRAME_SEC = 1;
+
+/**
  * Orchestrates a play-through: it decides which notes the player owns vs the app plays,
  * drives the {@link Conductor}, feeds the {@link ScoringSession}, and implements wait-mode
  * gating. It holds no rendering or device code — the render loop calls `update` each frame
@@ -52,8 +60,33 @@ export class GameSession {
    */
   private lastUpdateSec = 0;
 
+  /** Wall-clock seconds spent playing the lap under way. See {@link tickLapClock}. */
+  private lapSeconds = 0;
+  /** Wall clock at the previous `update`, or NaN when the lap clock needs re-anchoring. */
+  private lastWallMs = NaN;
+  /**
+   * Whether the lap under way began at the top of the range.
+   *
+   * Only a lap played from its start is an attempt at the passage. Scroll into the middle
+   * of a looping run and what comes round is half of one, and filing that alongside the
+   * whole thing would put a dip in the record for having looked at something.
+   */
+  private lapFromStart = false;
+
   /** Fired once when a scored run reaches the end of its range. */
-  onFinish?: (result: ScoreResult) => void;
+  onFinish?: (result: ScoreResult, seconds: number) => void;
+
+  /**
+   * Fired when a lap of a looping run comes round, with that lap's own score and how long
+   * it took.
+   *
+   * A loop is where the practice happens and it never finishes, so without this the only
+   * runs the app could ever record are the ones played end to end — which is to say, none
+   * of the ones you spend an evening on. Laps nobody played are not reported: a loop left
+   * running while you listen, or while you are out of the room, is not an attempt at
+   * anything and would drag a report's line down for hours at a time.
+   */
+  onLap?: (result: ScoreResult, seconds: number) => void;
 
   constructor(
     private readonly conductor: Conductor,
@@ -86,12 +119,19 @@ export class GameSession {
     this.reset();
   }
 
-  /** Rewind to the start of the range and clear the score, ready to play again. */
+  /**
+   * Rewind to the start of the range and clear the score, ready to play again.
+   *
+   * The lap being abandoned goes unrecorded. Starting over is what you do when a lap went
+   * wrong, and a record that counted the half you walked away from would be counting the
+   * decision to try again as a failure.
+   */
   reset(): void {
     this.conductor.pause();
     this.conductor.seek(this.rangeStart);
     this.aimAt(this.rangeStart);
     this.scoring = new ScoringSession(this.required);
+    this.startClock(true);
     this.state = "idle";
   }
 
@@ -109,6 +149,7 @@ export class GameSession {
   seek(seconds: number): void {
     this.conductor.seek(seconds);
     this.aimAt(this.conductor.time);
+    this.lapFromStart = false; // what comes round now is part of a lap, not one
   }
 
   /**
@@ -125,8 +166,49 @@ export class GameSession {
    * would otherwise be stepped over by the very carry that keeps the loop from drifting.
    */
   private startLap(): void {
+    this.endLap();
     this.aimAt(this.rangeStart);
     this.scoring = new ScoringSession(this.required);
+    this.startClock(true);
+  }
+
+  /**
+   * Hand the lap that has just come round to whoever is keeping the record.
+   *
+   * Finalized first, so the notes at the end of the passage that nobody played are counted
+   * as missed rather than left pending for ever — the lap is over and they are not coming.
+   */
+  private endLap(): void {
+    if (!this.scoring || !this.config || !this.lapFromStart) return;
+    this.scoring.finalize();
+    const result = this.scoring.result(this.config.difficulty);
+    // Judged nothing at all: the loop went by untouched, which is listening rather than
+    // practising. See {@link onLap}.
+    if (result.perfect + result.good + result.wrong === 0) return;
+    this.onLap?.(result, this.lapSeconds);
+  }
+
+  /** Begin timing a lap, `fromStart` saying whether it is a whole one. */
+  private startClock(fromStart: boolean): void {
+    this.lapSeconds = 0;
+    this.lastWallMs = NaN;
+    this.lapFromStart = fromStart;
+  }
+
+  /**
+   * Add the frame just gone to the lap's clock, if it was spent playing.
+   *
+   * What is being timed is how long the passage took you, so a run left paused adds
+   * nothing. A frame longer than {@link MAX_FRAME_SEC} is not practice either: it is a
+   * machine that went to sleep or a window that stopped being drawn, and counting it would
+   * put a lap of forty minutes in the record for having closed the lid.
+   */
+  private tickLapClock(nowMs: number): void {
+    const previous = this.lastWallMs;
+    this.lastWallMs = nowMs;
+    if (Number.isNaN(previous) || !this.conductor.isPlaying()) return;
+    const delta = (nowMs - previous) / 1000;
+    if (delta > 0 && delta <= MAX_FRAME_SEC) this.lapSeconds += delta;
   }
 
   /** Point the gate, the accompaniment and the end-of-run test at `seconds`. */
@@ -175,8 +257,14 @@ export class GameSession {
     return result;
   }
 
-  /** Advance the session to `nowSec`. Call once per frame after the Conductor ticks. */
-  update(nowSec: number): void {
+  /**
+   * Advance the session to `nowSec`. Call once per frame after the Conductor ticks.
+   *
+   * `nowMs` is the wall clock the lap is timed against, taken as an argument so a test can
+   * drive it the way it drives the transport.
+   */
+  update(nowSec: number, nowMs: number = Date.now()): void {
+    this.tickLapClock(nowMs);
     if (this.state !== "running") return;
 
     if (this.config?.waitMode) {
@@ -211,6 +299,8 @@ export class GameSession {
     this.conductor.pause();
     this.scoring?.finalize();
     this.state = "finished";
-    if (this.scoring && this.config) this.onFinish?.(this.scoring.result(this.config.difficulty));
+    if (this.scoring && this.config) {
+      this.onFinish?.(this.scoring.result(this.config.difficulty), this.lapSeconds);
+    }
   }
 }

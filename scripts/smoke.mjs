@@ -806,6 +806,50 @@ if (overBand !== null) {
   );
   await page.keyboard.press("Space");
   await page.waitForTimeout(200);
+
+  /**
+   * Every lap of the loop is written down, which is what a progress report is made of.
+   *
+   * A loop never finishes, so no score card ever comes up and nothing said how the last
+   * twenty minutes went. The lap is the unit instead, and only the whole chain proves it:
+   * the transport coming round, the session scoring that lap on its own, and the app
+   * putting it in storage under the name the loop is going by.
+   *
+   * Wait mode is turned off for it — it holds the music at each chord until the right
+   * notes arrive, and this script is pressing one key rather than playing the piece. That
+   * key is judged however it lands, right or wrong, and either way it is a lap somebody
+   * played: what is *not* recorded is a loop left running while nobody touches anything.
+   */
+  await page.uncheck("#wait");
+  await page.evaluate(() => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("piana:log:")) localStorage.removeItem(key);
+    }
+  });
+  await page.keyboard.press("a"); // letters are piano keys; A is C
+  const lap = await page
+    .waitForFunction(
+      () => {
+        const key = Object.keys(localStorage).find((k) => k.startsWith("piana:log:"));
+        const log = key ? JSON.parse(localStorage.getItem(key)) : [];
+        return log.length ? log[log.length - 1] : null;
+      },
+      null,
+      { timeout: 30000 },
+    )
+    .then((handle) => handle.jsonValue())
+    .catch(() => null);
+  const judged = lap ? lap.result.perfect + lap.result.good + lap.result.wrong : 0;
+  check(
+    "playing round a loop writes that lap down",
+    lap !== null && lap.label === "Chorus" && lap.seconds > 0 && judged >= 1,
+    lap
+      ? `${lap.label}, ${lap.seconds.toFixed(1)}s played, ${judged} note judged,`
+        + ` ${Math.round(lap.result.accuracy * 100)}% accurate`
+      : "no lap reached storage",
+  );
+  await page.check("#wait");
+  await page.waitForTimeout(200);
 }
 await page.screenshot({ path: path.join(SHOTS, "11-loop-playing.png") });
 
