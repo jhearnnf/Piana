@@ -169,6 +169,12 @@ export interface RenderState {
   /** The loop points marked so far. Either end may still be unset. */
   loop?: LoopMarks | null;
   /**
+   * Whether to veil the music outside the marks. Off when the marks are only parked —
+   * Loop switched off, the song running on past them — because greying out the music you
+   * are now playing says the opposite of what is happening. Defaults to on.
+   */
+  veil?: boolean;
+  /**
    * The region being looped, when Loop is on.
    *
    * Given, the stage shows nothing but this region's music, wrapped: its opening bars
@@ -281,7 +287,9 @@ export class PianoRenderer {
 
     const wrap = state.wrap ?? null;
     if (this.song) this.drawFallingNotes(this.song, state.nowSec, wrap);
-    if (state.loop || wrap) this.drawLoopMarks(state.loop ?? null, wrap, state.nowSec);
+    if (state.loop || wrap) {
+      this.drawLoopMarks(state.loop ?? null, wrap, state.nowSec, state.veil ?? true);
+    }
     this.drawHitLine();
     // Over the hit line, under the keys: the light reads as coming up off the
     // key rather than as another thing lying on the stage.
@@ -459,7 +467,12 @@ export class PianoRenderer {
    * played says the same thing in the shape you already read the stage in — what is lit
    * is what you are practising.
    */
-  private drawLoopMarks(marks: LoopMarks | null, wrap: TimeRange | null, nowSec: number): void {
+  private drawLoopMarks(
+    marks: LoopMarks | null,
+    wrap: TimeRange | null,
+    nowSec: number,
+    veil: boolean,
+  ): void {
     if (wrap) {
       this.drawLapLines(wrap, nowSec);
       return;
@@ -473,11 +486,11 @@ export class PianoRenderer {
     ctx.fillStyle = this.theme.loopVeil;
     // Earlier than the start means lower down the stage, so the start's veil hangs below
     // its line, all the way to the keys.
-    if (start !== null) {
+    if (veil && start !== null) {
       const y = Math.max(0, this.timeToY(start, nowSec));
       if (y < top) ctx.fillRect(0, y, this.cssWidth, top - y);
     }
-    if (end !== null) {
+    if (veil && end !== null) {
       const y = Math.min(top, this.timeToY(end, nowSec));
       if (y > 0) ctx.fillRect(0, 0, this.cssWidth, y);
     }

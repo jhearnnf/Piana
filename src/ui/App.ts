@@ -1956,6 +1956,18 @@ export class App {
   }
 
   /**
+   * Whether the stage should grey out the music outside the markers.
+   *
+   * Yes while they are being placed or dragged, and while their region is what is being
+   * practised. Not once a complete pair is merely parked — Loop switched off, the song
+   * playing on past the end marker — because then the greyed music is exactly the music
+   * you are playing.
+   */
+  private veilMarks(): boolean {
+    return this.range !== null || this.tuningMark || markedRegion(this.marks) === null;
+  }
+
+  /**
    * Apply the current zoom to the renderer's visible key range.
    *
    * Runs with no song loaded too. `visibleRange` has always had an answer for an empty
@@ -2050,6 +2062,7 @@ export class App {
       nowSec: now,
       pressed: this.pressed,
       loop: this.marks,
+      veil: this.veilMarks(),
       wrap: this.wrapRegion(),
     });
     this.timeline.render({
