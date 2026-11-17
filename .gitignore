@@ -7,3 +7,6 @@ dist-smoke
 
 # Per-machine Claude Code permissions, not project config.
 .claude/settings.local.json
+
+# Marketing video work (scripts, MIDI, Blender files, renders): kept local only.
+marketing/
