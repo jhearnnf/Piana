@@ -850,6 +850,39 @@ if (overBand !== null) {
   );
   await page.check("#wait");
   await page.waitForTimeout(200);
+
+  /**
+   * Right-clicking a saved loop offers its progress, and the lap just played is on it.
+   *
+   * The same chain as above read back the other way: the lap the app wrote down has to be
+   * the one the chart is drawn from, under the loop it was a lap of.
+   */
+  if (await page.textContent("#play").then((t) => /Pause/.test(t ?? ""))) {
+    await page.keyboard.press("Space");
+  }
+  await page.mouse.click(overBand, laneBox.y + 6, { button: "right" });
+  const menuUp = await page.waitForSelector(".context-menu", { timeout: 3000 }).catch(() => null);
+  check(
+    "right-clicking a saved loop opens a menu named after it",
+    menuUp !== null && (await page.textContent(".context-menu-title")) === "Chorus",
+  );
+  if (menuUp) {
+    await page.click(".context-menu button");
+    const card = await page.waitForSelector(".progress-card", { timeout: 3000 }).catch(() => null);
+    const lapsShown = card
+      ? Number(await page.textContent(".progress-tile-value"))
+      : 0;
+    const dots = await page.locator(".progress-dot").count();
+    check(
+      "See progress charts the laps of that loop",
+      card !== null && lapsShown >= 1 && dots >= 2 * lapsShown,
+      `${lapsShown} laps, ${dots} dots across the two charts`,
+    );
+    await page.screenshot({ path: path.join(SHOTS, "11a-loop-progress.png") });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(150);
+    check("Escape puts the progress away", await page.isHidden(".progress-card").catch(() => true));
+  }
 }
 await page.screenshot({ path: path.join(SHOTS, "11-loop-playing.png") });
 

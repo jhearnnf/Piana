@@ -44,23 +44,19 @@ export interface Attempt {
   result: ScoreResult;
 }
 
-/**
- * How many attempts one song keeps.
- *
- * Laps are short and a good practice session makes a lot of them, so this is a ceiling on
- * a file the user never sees rather than a judgement about how much history is
- * interesting. Oldest out first: a trend is read from its recent end, and the alternative —
- * refusing new laps once the list is full — would quietly stop recording the very sessions
- * a report is for.
- */
-export const MAX_ATTEMPTS = 400;
-
 const PREFIX = "piana:log:";
 
-/** Add `attempt` to a song's log, dropping the oldest once it is full. */
+/**
+ * Add `attempt` to a song's log.
+ *
+ * Nothing is ever dropped. A lap is under 300 bytes, so weeks of daily practice on a song is
+ * tens of kilobytes, and the history is the whole point: the first fortnight is the left end
+ * of every line on the progress chart. The only ceiling is storage itself (about 10 MB, tens
+ * of thousands of laps), and should that ever be reached the new lap fails to save while
+ * every lap already kept stays put — see `saveLog`.
+ */
 export function recordAttempt(log: readonly Attempt[], attempt: Attempt): Attempt[] {
-  const next = [...log, attempt];
-  return next.length <= MAX_ATTEMPTS ? next : next.slice(next.length - MAX_ATTEMPTS);
+  return [...log, attempt];
 }
 
 /** Everything one setup has to show for itself, across every attempt at it. */

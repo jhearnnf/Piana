@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   logKey,
-  MAX_ATTEMPTS,
   parseLog,
   parseLogKey,
   recordAttempt,
@@ -45,13 +44,12 @@ describe("recordAttempt", () => {
     expect(log.map((a) => a.at)).toEqual([1, 2]);
   });
 
-  it("drops the oldest once the song is full, so practice is never refused", () => {
+  it("keeps every lap, however many there are", () => {
     let log: Attempt[] = [];
-    for (let i = 0; i < MAX_ATTEMPTS + 3; i++) log = recordAttempt(log, attempt({ at: i }));
+    for (let i = 0; i < 5000; i++) log = recordAttempt(log, attempt({ at: i + 1 }));
 
-    expect(log).toHaveLength(MAX_ATTEMPTS);
-    expect(log[0]!.at).toBe(3);
-    expect(log[log.length - 1]!.at).toBe(MAX_ATTEMPTS + 2);
+    expect(log).toHaveLength(5000);
+    expect(log[0]!.at).toBe(1);
   });
 });
 

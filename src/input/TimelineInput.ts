@@ -19,6 +19,11 @@ export interface TimelineHandlers {
   onHover: (x: number, y: number) => void;
   /** The pointer has left the map, so whatever was lit up should go out. */
   onLeave: () => void;
+  /**
+   * A right-click landed at this point (canvas x, y; and the screen point to open a menu at).
+   * Return true to claim it, which keeps the browser's own menu from opening.
+   */
+  onMenu?: (x: number, y: number, clientX: number, clientY: number) => boolean;
 }
 
 /**
@@ -47,6 +52,7 @@ export class TimelineInput {
     this.canvas.addEventListener("pointerup", this.onUp);
     this.canvas.addEventListener("pointercancel", this.onUp);
     this.canvas.addEventListener("pointerleave", this.onOut);
+    this.canvas.addEventListener("contextmenu", this.onContext);
   }
 
   disconnect(): void {
@@ -55,6 +61,7 @@ export class TimelineInput {
     this.canvas.removeEventListener("pointerup", this.onUp);
     this.canvas.removeEventListener("pointercancel", this.onUp);
     this.canvas.removeEventListener("pointerleave", this.onOut);
+    this.canvas.removeEventListener("contextmenu", this.onContext);
     this.dragging = false;
   }
 
@@ -91,5 +98,11 @@ export class TimelineInput {
 
   private onOut = (): void => {
     this.handlers.onLeave();
+  };
+
+  private onContext = (e: MouseEvent): void => {
+    const x = e.clientX - this.canvas.getBoundingClientRect().left;
+    const y = e.clientY - this.canvas.getBoundingClientRect().top;
+    if (this.handlers.onMenu?.(x, y, e.clientX, e.clientY)) e.preventDefault();
   };
 }

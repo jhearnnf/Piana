@@ -75,6 +75,9 @@ import {
 import { escapeHtml, formatTime, sectionLabel } from "./format.ts";
 import { showResults } from "./resultsScreen.ts";
 import { showScores } from "./scoresScreen.ts";
+import { showProgress } from "./progressScreen.ts";
+import { showContextMenu } from "./contextMenu.ts";
+import { loopProgress } from "../game/progress.ts";
 import { showTracks } from "./tracksScreen.ts";
 import { showLibrary, type LibraryView } from "./libraryScreen.ts";
 import { buildLibrary, songTitle } from "../song/library.ts";
@@ -653,6 +656,7 @@ export class App {
       onPick: (x, y) => this.pickSavedLoop(x, y),
       onHover: (x, y) => this.hoverSavedLoop(x, y),
       onLeave: () => this.hoverSavedLoop(null, null),
+      onMenu: (x, y, clientX, clientY) => this.openLoopMenu(x, y, clientX, clientY),
       onGrab: () => {
         this.resumeAfterSeek = this.conductor.isPlaying();
         this.conductor.pause();
@@ -1169,6 +1173,44 @@ export class App {
       this.settleLoopMarks(); // which starts the run at the top of it
     }
     return true;
+  }
+
+  /**
+   * A right-click on the lane of saved loops: a menu of things to do with that loop.
+   *
+   * Returns whether the click was claimed, so a right-click anywhere else on the map is
+   * left alone.
+   */
+  private openLoopMenu(x: number, y: number, clientX: number, clientY: number): boolean {
+    const band = this.timeline.loopAt(x, y);
+    const loop = band && loopById(this.savedLoops, band.id);
+    if (!loop) return false;
+    this.hoverSavedLoop(null, null); // the tip would sit under the menu
+    showContextMenu(clientX, clientY, loop.name, [
+      { label: "📈 See progress", onPick: () => this.openLoopProgress(loop.id) },
+    ]);
+    return true;
+  }
+
+  /**
+   * Show how the playing of a saved loop has gone, lap by lap.
+   *
+   * Paused while it is up, like the scores: reading how you did last week while the current
+   * lap quietly racks up misses behind the overlay would be its own small insult.
+   */
+  private openLoopProgress(id: string): void {
+    const loop = loopById(this.savedLoops, id);
+    if (!loop) return;
+    if (this.conductor.isPlaying()) {
+      this.conductor.pause();
+      this.updatePlayButton();
+    }
+    showProgress(
+      loop.name,
+      `${formatTime(loop.start)}–${formatTime(loop.end)}`,
+      loopProgress(this.practiceLog, rangeOf(loop)),
+      { onClose: () => {} },
+    );
   }
 
   /**
